@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 import numpy as np
 import torch.nn as nn
@@ -48,6 +50,7 @@ MODEL_FACTORIES = {
 train_loader = None
 test_loader = None
 _classes = None
+dataset_name = None
 
 
 def normalize_model_name(model_name: str) -> str:
@@ -57,7 +60,7 @@ def normalize_model_name(model_name: str) -> str:
 
 
 def build_model(model_name: str, conv_type: int, bit_width: int, signed: bool, zone: bool,
-                multiplier_matrix=None, num_classes: int = 10):
+                multiplier_matrix: str | list[str] = None, num_classes: int = 10):
     if model_name not in MODEL_FACTORIES:
         raise ValueError(f"Model '{model_name}' not supported.")
     return MODEL_FACTORIES[model_name](
@@ -75,6 +78,10 @@ def setup_seed(seed):
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     torch.backends.cudnn.deterministic = True
+
+    torch.backends.cudnn.enabled = False
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True, warn_only=True)
 
 
 def clean_gpu(model=None, optimizer=None, scheduler=None):

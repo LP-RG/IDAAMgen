@@ -54,6 +54,23 @@ def gradient_error_weights(input, kernel, grad_output, stride, activation_zp, bi
 # ********************* Forward Methods  *********************
 
 def approx_convolution(input, weight, bias, stride, act_scale, weight_scale, activation_zp, weight_zp, signed, bit_width, multiplier_matrix):
+
+    if multiplier_matrix is None:
+        return quantized_convolution(
+            input,
+            weight,
+            bias,
+            stride,
+            act_scale,
+            weight_scale,
+            activation_zp,
+            weight_zp,
+            signed,
+            stats=False,
+            bit_width=bit_width,
+            name=None,
+        )
+
     res_matrix = torch.from_numpy(np.load(multiplier_matrix)).float().to("cuda")
     batch_size, _, in_height, in_width = input.size()
     out_channels, _, weight_height, weight_width = weight.size()
