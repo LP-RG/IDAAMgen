@@ -87,7 +87,6 @@ def quantized_convolution(input, weight, bias, stride, act_scale, weight_scale, 
     # mantenendo il contenitore int8 richiesto dal kernel 8x8.
     # I tensori arrivano come float che rappresentano interi -> cast esplicito a int prima dello shift.
     if shift_bits > 0:
-        #print(f"not_casted:{weight[0, 0, 0, 0], input[0, 0, 0, 0]}")
         input_dtype = input.dtype
         weight_dtype = weight.dtype
 
@@ -95,7 +94,6 @@ def quantized_convolution(input, weight, bias, stride, act_scale, weight_scale, 
 
         input_int = input.to(int_dtype)
         weight_int = weight.to(int_dtype)
-        #print(f"casted:{weight_int[0, 0, 0, 0], input_int[0, 0, 0, 0]}")
         input_int = torch.div(input_int, 2**shift_bits, rounding_mode='trunc') if signed \
             else torch.bitwise_right_shift(input_int, shift_bits)
         weight_int = torch.div(weight_int, 2**shift_bits, rounding_mode='trunc') if signed \
@@ -103,7 +101,6 @@ def quantized_convolution(input, weight, bias, stride, act_scale, weight_scale, 
 
         input = input_int.to(input_dtype)
         weight = weight_int.to(weight_dtype)
-        #print(f"shifted:{weight[0, 0, 0, 0], input[0, 0, 0, 0]}")
 
     input_unfolded = nn.functional.unfold(input, kernel_size=(weight_height, weight_width), stride=stride)
     kernel_flatten = weight.view(out_channels, -1)
@@ -112,7 +109,6 @@ def quantized_convolution(input, weight, bias, stride, act_scale, weight_scale, 
         input_unfolded.transpose(1, 2).contiguous(), kernel_flatten.T.contiguous(),
         heat_map, act_scale, activation_zp, weight_scale, weight_zp, bit_width, signed, shift_bits
     ).transpose(1, 2)
-    #print(f"shifted_output:{output[0, 0, 0]}")
     output_height = (in_height - weight_height) // stride[0] + 1
     output_width = (in_width - weight_width) // stride[1] + 1
     output = output.view(batch_size, out_channels, output_height, output_width)
