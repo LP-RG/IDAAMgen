@@ -166,7 +166,7 @@ def new_training_method(model_name: str, multiplier_matrix=None, conv_type: int 
         return test(model)
 
     # ---- conv_type 2: Quantized Model (QAT) ----
-    if conv_type == 2:
+    if conv_type == 2 and shift_bits == 0:
         exact_exists = os.path.exists(exact_path)
         quant_exists = os.path.exists(quant_path)
         if not exact_exists:
@@ -198,13 +198,13 @@ def new_training_method(model_name: str, multiplier_matrix=None, conv_type: int 
         return test(model)
 
     # ---- conv_type 3: Approximate Computing Model ----
-    if conv_type == 3:
+    if conv_type == 3 or shift_bits != 0:
         if not os.path.exists(quant_path):
             raise RuntimeError("Please train the quantized model first.")
             
         print("Retraining approximate model (3 epochs)...")
-        model = build_model(model_name, conv_type=3, bit_width=bit_width, signed=signed,
-                            zone=zone, multiplier_matrix=multiplier_matrix, num_classes=num_classes)
+        model = build_model(model_name, conv_type=conv_type, bit_width=bit_width, signed=signed,
+                            zone=zone, multiplier_matrix=multiplier_matrix, num_classes=num_classes , shift_bits=shift_bits)
         model.load_state_dict(torch.load(quant_path, weights_only=True))
         calibration(model)
         
