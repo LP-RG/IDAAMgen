@@ -1,10 +1,12 @@
 import torch
 import numpy as np
 from torch import nn
+#import modules.observers as observers
 import modules.functions as functions
 import modules.quantization as quantization
 
-from mqbench import observer
+from mqbench.observer import MSEObserver,EMAMSEObserver,MinMaxObserver
+
 # Conv Type list:
 # - 1 : standard convolution
 # - 2 : quantized convolution no error
@@ -13,7 +15,7 @@ from mqbench import observer
 
 #TODO Rendere parametrico anche matrice di approx_mult
 class Conv2d_custom(nn.Conv2d):
-    def __init__(self, channel_in,
+    def __init__(self,channel_in,
                 channel_out,
                 kernel_size,
                 stride,
@@ -22,12 +24,11 @@ class Conv2d_custom(nn.Conv2d):
                 conv_type,
                 bit_width,
                 multiplier_matrix,
-                signed=False,
-                name=None):
-
-        super().__init__(channel_in, channel_out, kernel_size, stride, padding, bias=bias)
-        self.channel_in = channel_in
-        self.channel_out = channel_out
+                signed = False,
+                name = None):
+        
+        super().__init__(channel_in,channel_out,kernel_size,stride,padding,bias = bias)
+        
         self.register_buffer('activation_scale', torch.tensor(1.0))
         self.register_buffer('activation_zp_neg', torch.tensor(0.0))
         self.register_buffer('weight_scale', torch.tensor(1.0))
@@ -36,28 +37,39 @@ class Conv2d_custom(nn.Conv2d):
         self.register_buffer('out_zp_neg', torch.tensor(0.0))
         
         self.signed = signed
-        quant_scale = f"torch.q{'u' if not signed else ''}int{bit_width}"
-        self.activation_observer = EMAMSEObserver(dtype=eval(quant_scale), qscheme= torch.per_tensor_affine)
-        self.weight_observer = MSEObserver(dtype=eval(quant_scale), qscheme= torch.per_tensor_affine)
-        self.output_observer = EMAMSEObserver(dtype=eval(quant_scale), qscheme= torch.per_tensor_affine)
+        if not 1 <= bit_width <= 8:
+            raise ValueError("bit_width must be between 1 and 8")
+
+        quant_dtype = torch.qint8 if signed else torch.quint8
+        quant_min = -(2 ** (bit_width - 1)) if signed else 0
+        quant_max = 2 ** (bit_width - 1) - 1 if signed else 2 ** bit_width - 1
+        observer_args = {
+            "dtype": quant_dtype,
+            "qscheme": torch.per_tensor_affine,
+            "quant_min": quant_min,
+            "quant_max": quant_max,
+        }
+        self.activation_observer = EMAMSEObserver(**observer_args)
+        self.weight_observer = MSEObserver(**observer_args)
+        self.output_observer = EMAMSEObserver(**observer_args)
         self.bit_width = bit_width
         self.multiplier_matrix = multiplier_matrix
         self.calibrating = False
-
+        
         self.name = name
         self.conv_type = conv_type
-        if conv_type == 1:
+        if(conv_type == 1):
             self.conv2d_op = None
-        elif conv_type == 2:
+        elif(conv_type == 2):
             self.conv2d_op = functions.QuantizedConv2d
-        elif conv_type == 3:
+        elif(conv_type == 3):
             self.conv2d_op = functions.ApproxConv2dSTE
-        elif conv_type == 4:
+        elif(conv_type == 4):
             self.conv2d_op = functions.ApproxConv2d
-        elif conv_type == 5:
+        elif(conv_type == 5):
             self.conv2d_op = functions.StatsQuantizedConv2d
         else:
-            raise NotImplementedError
+            raise(NotImplementedError) 
 
     def freeze_qparams(self):
         act_scale, act_zp = self.activation_observer.calculate_qparams()
@@ -97,7 +109,10 @@ class Conv2d_custom(nn.Conv2d):
             self.output_observer(out)  
             return out                           
         if self.signed:
-            raise NotImplementedError("signed=True path not implemented yet")
+            print("NOT IMPLEMENTED YET")
+            return
+            """input_int = quantization.signed_quantization(input, self.activation_scale, self.activation_quant_max)
+            weight_int = quantization.signed_quantization(self.weight, self.weight_scale, self.weight_quant_max)"""
         else:
             input_int = quantization.unsigned_quantization(input, self.activation_scale, self.activation_zp_neg, self.bit_width)
             weight_int = quantization.unsigned_quantization(self.weight, self.weight_scale, self.weight_zp_neg, self.bit_width)   
@@ -117,4 +132,3 @@ class Conv2d_custom(nn.Conv2d):
                             self.name,
                             self.multiplier_matrix)
         return quantization.simulate_industrial_rescaling(out, self.out_scale, self.out_zp_neg, self.bit_width)
-

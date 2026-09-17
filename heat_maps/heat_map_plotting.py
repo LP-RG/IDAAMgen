@@ -1,3 +1,4 @@
+import argparse
 import glob
 import os
 import re
@@ -6,12 +7,8 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from matplotlib.ticker import LogLocator, FuncFormatter
 
-folder_path_npy = './heat_maps/npy_matrix/8_resnet_20'
-folder_path_png = './heat_maps/plot/resnet_20_nw'
-file_extension = '*.npy'
-
 # ===============================
-# STANDARD PLOT STYLE (stesso approccio del primo script)
+# STANDARD PLOT STYLE
 # ===============================
 
 PLOT_STYLE = {
@@ -37,8 +34,6 @@ def setup_plot_style():
 
 CMAP_NAME = "viridis"
 
-os.makedirs(folder_path_png, exist_ok=True)
-
 def _sanitize(arr):
     arr = np.asarray(arr, dtype=float)
     return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
@@ -50,15 +45,15 @@ def _cmap():
     cmap.set_bad(low)
     return cmap
 
-XTICKS = [0, 50, 100, 150, 200, 250]
-YTICKS = [0, 50, 100, 150, 200, 250]
+def _compute_ticks(bitwidth):
+    max_val = 2 ** bitwidth
+    ticks = np.linspace(0, max_val, num=6, dtype=int).tolist()
+    return ticks
 
-def _plot_matrix(mat, xlabel, ylabel, out_path, title=None, total_sum=None):
-
+def _plot_matrix(mat, xlabel, ylabel, out_path, xticks, yticks, title=None, total_sum=None):
     mat = _sanitize(mat)
     cmap = _cmap()
 
-    # Preparazione valori >0 per LogNorm
     positive_mask = mat > 0
     if not np.any(positive_mask):
         mat_safe = np.ones_like(mat) * 1e-10
@@ -80,8 +75,8 @@ def _plot_matrix(mat, xlabel, ylabel, out_path, title=None, total_sum=None):
         aspect='equal'
     )
 
-    ax.set_xticks(XTICKS)
-    ax.set_yticks(YTICKS)
+    ax.set_xticks(xticks)
+    ax.set_yticks(yticks)
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -94,12 +89,10 @@ def _plot_matrix(mat, xlabel, ylabel, out_path, title=None, total_sum=None):
     ax.tick_params(labelsize=14)
     cbar.ax.tick_params(labelsize=14)
 
-    # Ticks coerenti in scala log
     locator = LogLocator(numticks=6)
     cbar.locator = locator
     cbar.update_ticks()
 
-    # Formatter della colorbar in formato scientifico (evita percentuali su log)
     cbar.ax.yaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{x:.0e}"))
     cbar.update_ticks()
 
@@ -109,15 +102,23 @@ def _plot_matrix(mat, xlabel, ylabel, out_path, title=None, total_sum=None):
     plt.savefig(out_path, bbox_inches='tight')
     plt.close(fig)
 
-def heat_maps_plotting():
+def heat_maps_plotting(folder_path_npy, folder_path_png, bitwidth):
+    ticks = _compute_ticks(bitwidth)
+    files = glob.glob(os.path.join(folder_path_npy, "*.npy"))
+    
+    aggregate_mat = None
 
-    for file_path in glob.glob(os.path.join(folder_path_npy, file_extension)):
-
+    for file_path in files:
         h = np.load(file_path)
         h = _sanitize(h)
 
         mat = np.sum(h, axis=0) if h.ndim == 3 else h
         total_sum = np.sum(mat)
+
+        if aggregate_mat is None:
+            aggregate_mat = np.copy(mat)
+        else:
+            aggregate_mat += mat
 
         out_path = re.sub(
             r"\.npy$", ".png",
@@ -129,9 +130,46 @@ def heat_maps_plotting():
             xlabel="Weights",
             ylabel="Activations",
             out_path=out_path,
+            xticks=ticks,
+            yticks=ticks,
             total_sum=total_sum
         )
 
+    # Plot della matrice aggregata
+    if aggregate_mat is not None:
+        agg_out_path = os.path.join(folder_path_png, "aggregate_distribution.png")
+        _plot_matrix(
+            aggregate_mat,
+            xlabel="Weights",
+            ylabel="Activations",
+            out_path=agg_out_path,
+            xticks=ticks,
+            yticks=ticks,
+            title="Aggregate Distribution",
+            total_sum=np.sum(aggregate_mat)
+        )
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Plot heatmaps from NPY matrices.")
+    parser.add_argument(
+        "--folder_path_npy",
+        type=str,
+        default="./heat_maps/npy_matrix/7bit_resnet20_cifar10",
+        help="Input directory containing .npy files"
+    )
+    parser.add_argument(
+        "--folder_path_png",
+        type=str,
+        default="./heat_maps/plot/7bit_resnet20_cifar10",
+        help="Output directory for generated plots"
+    )
+    parser.add_argument(
+        "--bitwidth",
+        type=int,
+        default=7,
+        help="Bitwidth used for quantization (e.g., 7 or 8)"
+    )
+    args = parser.parse_args()
+
     setup_plot_style()
-    heat_maps_plotting()
+    heat_maps_plotting(args.folder_path_npy, args.folder_path_png, args.bitwidth)
