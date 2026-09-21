@@ -361,7 +361,7 @@ if __name__ == "__main__":
     start = time.time()
     p = args.input_path
 
-
+    # Scenario 1: No input path provided -> run exact pipeline only
     if p is None:
         setup_seed(args.seed)
         set_data_loaders(model_name, args.dataset)

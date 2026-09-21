@@ -60,7 +60,7 @@ def normalize_model_name(model_name: str) -> str:
 
 
 def build_model(model_name: str, conv_type: int, bit_width: int, signed: bool, zone: bool,
-                multiplier_matrix: str | list[str] = None, num_classes: int = 10):
+                multiplier_matrix=None, num_classes: int = 10):
     if model_name not in MODEL_FACTORIES:
         raise ValueError(f"Model '{model_name}' not supported.")
     return MODEL_FACTORIES[model_name](

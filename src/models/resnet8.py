@@ -64,3 +64,4 @@ class ResNet8(nn.Module):
         out = torch.flatten(out, 1)
         out = self.fc(out)
         return out
+    
