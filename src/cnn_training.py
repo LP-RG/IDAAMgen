@@ -27,17 +27,6 @@ import numpy as np
 import sys
 import mqbench
 
-def _debug_print(message: str):
-    print(f"[DEBUG] {message}", flush=True)
-
-
-def _describe_multiplier_input(multiplier_matrix: str | list[str]):
-    if isinstance(multiplier_matrix, (list)):
-        return f"{len(multiplier_matrix)} files" + f" ({', '.join(os.path.basename(m) for m in multiplier_matrix)})"
-    if multiplier_matrix is None:
-        return "None"
-    return os.path.basename(multiplier_matrix)
-
 def calibration(model, stats=False):
     """Calibrates model activations/weights using the training set."""
     print("Calibrating model...")
@@ -83,7 +72,7 @@ def set_data_loaders(model_name: str, cli_dataset_name: str = None):
             raise ValueError(f"Cannot get dataset for model '{model_name}'. Specify --dataset explicitly or check the model name.")
 
 
-    if name in ("lenet5", "resnet", "resnet8"):
+    if name in ("lenet5", "resnet", "resnet8", "resnet20"):
         batch_size = 64
     elif name in ("vgg16", "alexnet_cifar10", "resnet56"):
         batch_size = 128
@@ -176,14 +165,14 @@ def test(model):
     return acc
 
 
-def new_training_method(model_name: str, multiplier_matrix: str | list[str] = None, conv_type: int = 1,
+def new_training_method(model_name: str, multiplier_matrix = None, conv_type: int = 1,
                         bit_width: int = 8, signed: bool = False, zone: bool = False,
                         exact_accuracy: float = 0, no_retraining: bool = False):
     """Main pipeline handling full-precision, quantized, and approximate hardware simulation training."""
-    
-    input_name = _describe_multiplier_input(multiplier_matrix)
-    _debug_print(f"new_training_method(model_name={model_name}, conv_type={conv_type}, bit_width={bit_width}, input={input_name}, multiple_layers={isinstance(multiplier_matrix, list)})")
-    
+
+
+    input_name = multiplier_matrix.split("/")[-1] if multiplier_matrix is not None else "None"
+
     print(f"Network training with parameters: model_name={model_name}, conv_type={conv_type}, "
           f"bit_width={bit_width}, signed={signed}, input={input_name}, dataset={dataset_name}")
 
@@ -195,12 +184,7 @@ def new_training_method(model_name: str, multiplier_matrix: str | list[str] = No
     quant_path = os.path.join(models_dir, f"{model_name}_{dataset_name}_q{bit_width}.pth")
 
     #approx_tag = os.path.splitext(input_name)[0] if multiplier_matrix is isinstance(multiplier_matrix, str) else "default"
-    if isinstance(multiplier_matrix, str):
-        mult_matrix_specs = [f"{os.path.basename(multiplier_matrix)}"]
-    elif isinstance(multiplier_matrix, list):
-        mult_matrix_specs = [f"{os.path.basename(m)}" for m in multiplier_matrix]
-    else:
-        mult_matrix_specs = ["m=default"]
+    mult_matrix_specs = os.path.basename(multiplier_matrix) if isinstance(multiplier_matrix, str) else "default"
         
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")  
     approx_noretrain_path = os.path.join(
@@ -225,9 +209,6 @@ def new_training_method(model_name: str, multiplier_matrix: str | list[str] = No
 
 
     num_classes = _classes if _classes else 10
-
-    if (model_name.lower() != "resnet8" and model_name.lower() != "resnet") and isinstance(multiplier_matrix, (list, tuple)):
-        multiplier_matrix = multiplier_matrix[0] if multiplier_matrix else None
 
     # ---- conv_type 1: Exact (FP32) Model ----
     if conv_type == 1:
@@ -374,9 +355,6 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42, required=False)
     parser.add_argument("--dataset", type=str, choices=["cifar10", "cifar100", "mnist"], required=False, help="Which dataset to use for training and evaluation.")
 
-    parser.add_argument("--multiple_layers", action="store_true", default=False, help="if set use one multiplier matrix for each layer, otherwise use the same for all layers, input can be a single .npy corresponding to a single layer or a folder with multiple .npy that can correspond all to a single layer or each to a different layer based on --layer_mode (filemanes must contain layer)")
-    parser.add_argument("--layer_mode", choices=["1", "2"], default="2", help="To use when --multiple_layers is set, if 1 it does one training per file; and use each file in the folder for the same corresponding layer, if 2 do a single training and use each file in the folder for the corresponding layer, if a layer has no corresponding file it will use the default multiplier")
-
     args = parser.parse_args()
 
     model_name = normalize_model_name(args.model_name)
@@ -384,118 +362,41 @@ if __name__ == "__main__":
     p = args.input_path
 
 
-    _debug_print(f"CLI args: multiple_layers={args.multiple_layers}, layer_mode={args.layer_mode}, input_path={p}")
+    if p is None:
+        setup_seed(args.seed)
+        set_data_loaders(model_name, args.dataset)
+        acc = new_training_method(model_name, None, args.conv_type, args.bit_width,
+                                  args.signed, args.zone, args.exact_accuracy)
+        print(f"Exact model accuracy: {acc}")
+        sys.exit(0)
 
-    # Scenario 1: Using the same approximate multiplier for all layers
-    if not args.multiple_layers:
-        # Scenario 1.1: No input path provided -> run exact pipeline only
-        if p is None:
-            setup_seed(int(args.seed))
-            set_data_loaders(model_name, args.dataset)
-            acc = new_training_method(model_name, None, args.conv_type, args.bit_width,
-                                    args.signed, args.zone, args.exact_accuracy)
-            print(f"Exact model accuracy: {acc}")
-            sys.exit(0)
+    if not os.path.exists(p):
+        print(f"Error: The input path '{p}' does not exist.")
+        sys.exit(1)
 
-        if not os.path.exists(p):
-            print(f"Error: The input path '{p}' does not exist.")
-            sys.exit(1)
+    # Scenario 2: Input path is a single multiplier matrix file
+    if os.path.isfile(p):
+        setup_seed(args.seed)
+        set_data_loaders(model_name, args.dataset)
+        acc = new_training_method(model_name, p, args.conv_type, args.bit_width,
+                                  args.signed, args.zone, args.exact_accuracy, args.no_retraining)
+        print(f"FINAL_ACCURACY:{acc}")
+        clean_gpu()
+        sys.exit(0)
 
-        # Scenario 1.2: Input path is a single multiplier matrix file
-        if os.path.isfile(p):
-            setup_seed(int(args.seed))
-            set_data_loaders(model_name, args.dataset)
-            acc = new_training_method(model_name, p, args.conv_type, args.bit_width,
-                                    args.signed, args.zone, args.exact_accuracy, args.no_retraining)
-            print(f"FINAL_ACCURACY:{acc}")
-            clean_gpu()
-            sys.exit(0)
+    # Scenario 3: Input path is a directory -> batch evaluate all .npy files
+    results = {}
+    for f in os.listdir(p):
+        if not f.endswith(".npy"):
+            continue
+        file_path = os.path.join(p, f)
+        setup_seed(args.seed)
+        set_data_loaders(model_name, args.dataset)
+        acc = new_training_method(model_name, file_path, args.conv_type, args.bit_width,
+                                  args.signed, args.zone, args.exact_accuracy, args.no_retraining)
+        print(f"FINAL_ACCURACY:{acc}")
+        results[f] = acc
+        clean_gpu()
 
-        # Scenario 1.3: Input path is a directory -> batch evaluate all .npy files
-        results = {}
-        for f in os.listdir(p):
-            if not f.endswith(".npy"):
-                continue
-            file_path = os.path.join(p, f)
-            setup_seed(int(args.seed))
-            set_data_loaders(model_name, args.dataset)
-            acc = new_training_method(model_name, file_path, args.conv_type, args.bit_width,
-                                    args.signed, args.zone, args.exact_accuracy, args.no_retraining)
-            print(f"FINAL_ACCURACY:{acc}")
-            results[f] = acc
-            clean_gpu()
-
-        print("Batch results dictionary:", results)
-        print(f"Total training time: {time.time() - start:.2f} seconds")
-
-    # Scenario 2: Using different approximate multipliers for each layer
-    else:
-        # Scenario 2.1: Layer mode 1 - Use a single npy file for the corresponding layer, iterate over
-        #  all files for a single layer in a directory, layers with no corresponding npy file it will use the default multiplier    
-        if args.layer_mode == "1":
-            if p is None or not os.path.exists(p):
-                print(f"Error: The input path '{p}' does not exist or is not a directory.")
-                sys.exit(1)
-
-            setup_seed(int(args.seed))
-            set_data_loaders(model_name, args.dataset)
-
-            if not os.path.isdir(p):
-                file_list = [p] if p.endswith(".npy") else []
-            else:   
-                file_list = [os.path.join(p, f) for f in sorted(os.listdir(p)) if f.endswith(".npy")]
-                if not file_list:
-                    print(f"Error: No .npy files found in the directory '{p}'.")
-                    sys.exit(1)
-            _debug_print("layer_mode=1 file_list=" + ", ".join(os.path.basename(f) for f in file_list))
-            results = {}
-            for file in file_list:
-                acc = new_training_method(
-                    model_name,
-                    [file],
-                    args.conv_type,
-                    args.bit_width,
-                    args.signed,
-                    args.zone,
-                    args.exact_accuracy,
-                    args.no_retraining
-                )
-                print(f"FINAL_ACCURACY:{acc}")
-                results[file] = acc
-                clean_gpu()
-
-            print("Batch results dictionary:", results)
-            print(f"Total training time: {time.time() - start:.2f} seconds")
-
-        # Scenario 2.2: Layer mode 2 - Use x npy files for the correspoding x layers, if a layer has no corresponding npy file it will use the default multiplier
-        if args.layer_mode == "2":
-            if p is None or not os.path.exists(p):
-                print(f"Error: The input path '{p}' does not exist or is not a directory.")
-                sys.exit(1)
-
-            setup_seed(int(args.seed))
-            set_data_loaders(model_name, args.dataset)
-
-            if not os.path.isdir(p):
-                file_list = [p] if p.endswith(".npy") else []
-            else:   
-                file_list = [os.path.join(p, f) for f in sorted(os.listdir(p)) if f.endswith(".npy")]
-                if not file_list:
-                    print(f"Error: No .npy files found in the directory '{p}'.")
-                    sys.exit(1)
-            _debug_print("layer_mode=2 file_list=" + ", ".join(os.path.basename(f) for f in file_list))
-            
-            acc = new_training_method(
-                model_name,
-                file_list,
-                args.conv_type,
-                args.bit_width,
-                args.signed,
-                args.zone,
-                args.exact_accuracy,
-                args.no_retraining
-            )
-            print(f"FINAL_ACCURACY:{acc}")
-            clean_gpu()
-
-    print(f"Total training time: {time.time() - start}")
+    print("Batch results dictionary:", results)
+    print(f"Total training time: {time.time() - start:.2f} seconds")
