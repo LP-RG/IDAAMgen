@@ -121,18 +121,22 @@ def get_mnist(batch_size):
     return train_loader, test_loader, num_classes
 
 
-def get_datasets(batch_size, model_name):
-    model = model_name.lower()
-    if model == "lenet5":
-        train_loader, test_loader, num_classes = get_mnist(batch_size=batch_size)
-        return train_loader, test_loader, num_classes
-    if  model == "vgg16" or model == "resnet" or model == "alexnet_cifar10" or model == "resnet8":
-        train_loader, test_loader, _ , num_classes = get_cifar10(
-            batch_size=batch_size, data_root='./data/cifar'
-        )
-        return train_loader, test_loader, num_classes
-    if model == "resnet56":
-        train_loader, test_loader, _ , num_classes = get_cifar100(
-            batch_size=batch_size, data_root='./data/cifar100'
-        )
-        return train_loader, test_loader, num_classes
+def get_datasets(batch_size, dataset_name):
+
+    if dataset_name is not None:
+        dataset = dataset_name.lower()
+        if dataset == "mnist":
+            train_loader, test_loader, num_classes = get_mnist(batch_size=batch_size)
+            return train_loader, test_loader, num_classes
+        elif dataset == "cifar10":
+            train_loader, test_loader, _, num_classes = get_cifar10(
+                batch_size=batch_size, data_root='./data/cifar'
+            )
+            return train_loader, test_loader, num_classes
+        elif dataset == "cifar100":
+            train_loader, test_loader, _, num_classes = get_cifar100(
+                batch_size=batch_size, data_root='./data/cifar100'
+            )
+            return train_loader, test_loader, num_classes
+        else:
+            raise ValueError(f"Unsupported dataset: {dataset}")

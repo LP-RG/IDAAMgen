@@ -1,4 +1,4 @@
-PY := python3.10
+PY := python3.11
 ENV_NAME := .venv
 DELETION_DELAY ?= 10
 
@@ -19,7 +19,7 @@ py_dep: py_init
 	@echo "\n[[ installing/upgrading python dependencies ]]"
 	$(IN_ENV) python3 -m pip install --upgrade pip setuptools wheel
 	$(IN_ENV) pip install --upgrade -r requirements.txt
-	$(IN_ENV) pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu121
+	$(IN_ENV) pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
 	$(IN_ENV) pip install --no-build-isolation ./src/extension_cpp/.
 
 $(MQBENCH_DIR)/.git:
@@ -50,4 +50,3 @@ rm_mqbench:
 
 clean: rm_cache rm_temp rm_pyenv rm_mqbench
 	@echo "\n[[ all clean! ]]"
-

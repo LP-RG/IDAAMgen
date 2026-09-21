@@ -37,10 +37,21 @@ class Conv2d_custom(nn.Conv2d):
         self.register_buffer('out_zp_neg', torch.tensor(0.0))
         
         self.signed = signed
-        quant_scale = f"torch.q{'u' if not signed else ''}int{bit_width}"
-        self.activation_observer = EMAMSEObserver(dtype=eval(quant_scale), qscheme= torch.per_tensor_affine)
-        self.weight_observer = MSEObserver(dtype=eval(quant_scale), qscheme= torch.per_tensor_affine)
-        self.output_observer = EMAMSEObserver(dtype=eval(quant_scale), qscheme= torch.per_tensor_affine)
+        if not 1 <= bit_width <= 8:
+            raise ValueError("bit_width must be between 1 and 8")
+
+        quant_dtype = torch.qint8 if signed else torch.quint8
+        quant_min = -(2 ** (bit_width - 1)) if signed else 0
+        quant_max = 2 ** (bit_width - 1) - 1 if signed else 2 ** bit_width - 1
+        observer_args = {
+            "dtype": quant_dtype,
+            "qscheme": torch.per_tensor_affine,
+            "quant_min": quant_min,
+            "quant_max": quant_max,
+        }
+        self.activation_observer = EMAMSEObserver(**observer_args)
+        self.weight_observer = MSEObserver(**observer_args)
+        self.output_observer = EMAMSEObserver(**observer_args)
         self.bit_width = bit_width
         self.multiplier_matrix = multiplier_matrix
         self.calibrating = False
@@ -121,4 +132,3 @@ class Conv2d_custom(nn.Conv2d):
                             self.name,
                             self.multiplier_matrix)
         return quantization.simulate_industrial_rescaling(out, self.out_scale, self.out_zp_neg, self.bit_width)
-
