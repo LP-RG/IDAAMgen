@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,36 +10,76 @@ import time
 import mat_mul
 import modules.data_loaders as data_loader
 
+import modules.convolution as conv
+
+from datetime import datetime
+
+import json
+
+
 from modules.common import (
     trained_models_path, device,
     normalize_model_name, build_model,
     setup_seed, clean_gpu,
-    train_loader, test_loader, _classes,
+    dataset_name, train_loader, test_loader, _classes,
 )
-
+import numpy as np
+import sys
+import mqbench
 
 def calibration(model, stats=False):
     """Calibrates model activations/weights using the training set."""
     print("Calibrating model...")
+
+    for m in model.modules():
+        if isinstance(m, conv.Conv2d_custom):
+            m.calibrating = not stats
+
     if stats:
         model.eval()
     else:
         model.train()
-    for inputs, _ in train_loader:
-        inputs = inputs.to(device)
-        model(inputs)
 
-def set_data_loaders(model_name: str, batch_size: int = 64):
+    with torch.no_grad():
+        for i, (inputs, _) in enumerate(train_loader):
+            if i >= 2048 // batch_size:
+                break
+            inputs = inputs.to(device)
+            model(inputs)
+
+    if not stats:
+        for m in model.modules():
+            if isinstance(m, conv.Conv2d_custom):
+                m.freeze_qparams()
+
+
+def set_data_loaders(model_name: str, cli_dataset_name: str = None):
     """Sets appropriate batch sizes based on the model architecture and loads data."""
-    global train_loader, test_loader, _classes
+    global train_loader, test_loader, _classes, batch_size, dataset_name
+
     name = model_name.lower()
 
-    if name in ("lenet5", "resnet", "resnet8"):
+    if cli_dataset_name is not None:
+        dataset_name = cli_dataset_name.lower()
+    else:
+        if name == "lenet5":
+            dataset_name = "mnist"
+        elif name in ("vgg16", "alexnet_cifar10", "resnet8", "resnet20", "resnet"):
+            dataset_name = "cifar10"
+        elif name == "resnet56":
+            dataset_name = "cifar100"
+        else:
+            raise ValueError(f"Cannot get dataset for model '{model_name}'. Specify --dataset explicitly or check the model name.")
+
+
+    if name in ("lenet5", "resnet", "resnet8", "resnet20"):
         batch_size = 64
     elif name in ("vgg16", "alexnet_cifar10", "resnet56"):
         batch_size = 128
 
-    train_loader, test_loader, _classes = data_loader.get_datasets(batch_size, model_name)
+        
+
+    train_loader, test_loader, _classes = data_loader.get_datasets(batch_size, dataset_name)
 
 
 def get_exact_training_setup(model_name: str, model: nn.Module):
@@ -101,7 +143,9 @@ def train_one_epoch(epoch, model, optimizer, criterion):
         _, predicted = outputs.max(1)
         total += targets.size(0)
         correct += predicted.eq(targets).sum().item()
-    print(f"Epoch {epoch + 1}: Loss: {total_loss/len(train_loader):.4f}, Accuracy: {100.*correct/total:.2f}%")
+    avg_loss = total_loss / len(train_loader)
+    print(f"Epoch {epoch + 1}: Loss: {avg_loss:.4f}, Accuracy: {100.*correct/total:.2f}%")
+    return avg_loss
 
 
 def test(model):
@@ -121,28 +165,48 @@ def test(model):
     return acc
 
 
-def new_training_method(model_name: str, multiplier_matrix=None, conv_type: int = 1,
+def new_training_method(model_name: str, multiplier_matrix = None, conv_type: int = 1,
                         bit_width: int = 8, signed: bool = False, zone: bool = False,
                         exact_accuracy: float = 0, no_retraining: bool = False, shift_bits = 0):
     """Main pipeline handling full-precision, quantized, and approximate hardware simulation training."""
+
+
     input_name = multiplier_matrix.split("/")[-1] if multiplier_matrix is not None else "None"
+
     print(f"Network training with parameters: model_name={model_name}, conv_type={conv_type}, "
-          f"bit_width={bit_width}, signed={signed}, input={input_name}")
+          f"bit_width={bit_width}, signed={signed}, input={input_name}, dataset={dataset_name}")
 
     models_dir = trained_models_path.rstrip('/')
     os.makedirs(models_dir, exist_ok=True)
 
     # Define paths for checkpoints
-    exact_path = os.path.join(models_dir, f"{model_name}.pth")
-    quant_path = os.path.join(models_dir, f"{model_name}_q{bit_width}.pth")
+    exact_path = os.path.join(models_dir, f"{model_name}_{dataset_name}.pth")
+    quant_path = os.path.join(models_dir, f"{model_name}_{dataset_name}_q{bit_width}.pth")
 
-    approx_tag = os.path.splitext(input_name)[0] if multiplier_matrix is not None else "default"
+    #approx_tag = os.path.splitext(input_name)[0] if multiplier_matrix is isinstance(multiplier_matrix, str) else "default"
+    mult_matrix_specs = os.path.basename(multiplier_matrix) if isinstance(multiplier_matrix, str) else "default"
+        
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")  
     approx_noretrain_path = os.path.join(
-        models_dir, f"{model_name}_a{bit_width}_{approx_tag}_noretrain.pth"
+        models_dir, f"{model_name}_{dataset_name}_{timestamp}_noretrain.pth"
     )
     approx_retrained_best_path = os.path.join(
-        models_dir, f"{model_name}_a{bit_width}_{approx_tag}_retrained_best.pth"
+        models_dir, f"{model_name}_{dataset_name}_{timestamp}_retrained_best.pth"
     )
+
+    config_path = os.path.join(models_dir, "config", f"{timestamp}.json")
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+
+    config_specs = {
+        "model_name": model_name,
+        "conv_type": conv_type,
+        "bit_width": bit_width,
+        "signed": signed,
+        "zone": zone,
+        "dataset_name": dataset_name,
+        "multiplier_matrix": mult_matrix_specs,
+    }
+
 
     num_classes = _classes if _classes else 10
 
@@ -158,11 +222,16 @@ def new_training_method(model_name: str, multiplier_matrix=None, conv_type: int 
         print("Training exact model from scratch...")
         epochs, optimizer, scheduler = get_exact_training_setup(model_name, model)
         criterion = nn.CrossEntropyLoss()
+        final_loss = None
         for epoch in range(epochs):
             print(f"Epoch {epoch + 1}\n-------------------------------")
-            train_one_epoch(epoch, model, optimizer, criterion)
+            final_loss = train_one_epoch(epoch, model, optimizer, criterion)
             scheduler.step()
         torch.save(model.state_dict(), exact_path)
+        
+        if final_loss is not None:
+            print(f"FINAL_LOSS: {final_loss:.6f}")
+
         return test(model)
 
     # ---- conv_type 2: Quantized Model (QAT) ----
@@ -183,13 +252,18 @@ def new_training_method(model_name: str, multiplier_matrix=None, conv_type: int 
             optimizer = optim.Adam(model.parameters(), lr=lr)
             scheduler = optim.lr_scheduler.StepLR(optimizer=optimizer, step_size=10, gamma=0.5)
             best_acc = 0.0
+            final_loss = None
             for epoch in range(5):
                 print(f"Epoch {epoch + 1}\n-------------------------------")
-                train_one_epoch(epoch, model, optimizer, criterion)
+                final_loss = train_one_epoch(epoch, model, optimizer, criterion)
                 scheduler.step()
                 acc = test(model)
                 best_acc = max(best_acc, acc)
             torch.save(model.state_dict(), quant_path)
+
+            if final_loss is not None:
+                print(f"FINAL_LOSS: {final_loss:.6f}")
+
             return best_acc
             
         print("Evaluating pre-existing quantized model...")
@@ -212,6 +286,11 @@ def new_training_method(model_name: str, multiplier_matrix=None, conv_type: int 
             acc = test(model)
             torch.save(model.state_dict(), approx_noretrain_path)
             print(f"Saved approximate (no-retrain) checkpoint to: {approx_noretrain_path}")
+
+            with open(config_path, "w") as f:
+                json.dump(config_specs, f, indent=4)
+            print(f"Saved training configuration to: {config_path}")
+
             return acc
             
         criterion = nn.CrossEntropyLoss()
@@ -220,10 +299,12 @@ def new_training_method(model_name: str, multiplier_matrix=None, conv_type: int 
         scheduler = optim.lr_scheduler.StepLR(optimizer=optimizer, step_size=10, gamma=0.5)
         best_accuracy = 0
         best_state = None
+
+        final_loss = None
         
         for epoch in range(3):
             print(f"Epoch {epoch + 1}\n-------------------------------")
-            train_one_epoch(epoch, model, optimizer, criterion)
+            final_loss = train_one_epoch(epoch, model, optimizer, criterion)
             scheduler.step()
             acc = test(model)
             # Early stop if accuracy drops drastically below baseline
@@ -233,10 +314,18 @@ def new_training_method(model_name: str, multiplier_matrix=None, conv_type: int 
             if acc > best_accuracy:
                 best_accuracy = acc
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-                
+
+        if final_loss is not None:
+            print(f"FINAL_LOSS: {final_loss:.6f}")
+
         checkpoint = best_state if best_state is not None else model.state_dict()
         torch.save(checkpoint, approx_retrained_best_path)
         print(f"Saved approximate (retrained-best) checkpoint to: {approx_retrained_best_path}")
+
+        with open(config_path, "w") as f:
+            json.dump(config_specs, f, indent=4)
+        print(f"Saved training configuration to: {config_path}")
+
         return best_accuracy
 
     # ---- conv_type 5: Calibration Statistics Collection ----
@@ -263,8 +352,10 @@ if __name__ == "__main__":
     parser.add_argument("--input_path", nargs="?", default=None)
     parser.add_argument("--exact_accuracy", type=float, default=0)
     parser.add_argument("--no_retraining", action="store_true", default=False)
-    parser.add_argument("--seed",default=42,required=False)
     parser.add_argument("--shift_bits", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42, required=False)
+    parser.add_argument("--dataset", type=str, choices=["cifar10", "cifar100", "mnist"], required=False, help="Which dataset to use for training and evaluation.")
+
     args = parser.parse_args()
 
     model_name = normalize_model_name(args.model_name)
@@ -274,7 +365,7 @@ if __name__ == "__main__":
     # Scenario 1: No input path provided -> run exact pipeline only
     if p is None:
         setup_seed(args.seed)
-        set_data_loaders(model_name)
+        set_data_loaders(model_name, args.dataset)
         acc = new_training_method(model_name, None, args.conv_type, args.bit_width,
                                   args.signed, args.zone, args.exact_accuracy, shift_bits=args.shift_bits)
         print(f"Exact model accuracy: {acc}")
@@ -287,7 +378,7 @@ if __name__ == "__main__":
     # Scenario 2: Input path is a single multiplier matrix file
     if os.path.isfile(p):
         setup_seed(args.seed)
-        set_data_loaders(model_name)
+        set_data_loaders(model_name, args.dataset)
         acc = new_training_method(model_name, p, args.conv_type, args.bit_width,
                                   args.signed, args.zone, args.exact_accuracy, args.no_retraining,shift_bits= args.shift_bits)
         print(f"FINAL_ACCURACY:{acc}")
@@ -301,7 +392,7 @@ if __name__ == "__main__":
             continue
         file_path = os.path.join(p, f)
         setup_seed(args.seed)
-        set_data_loaders(model_name)
+        set_data_loaders(model_name, args.dataset)
         acc = new_training_method(model_name, file_path, args.conv_type, args.bit_width,
                                   args.signed, args.zone, args.exact_accuracy, args.no_retraining, shift_bits=args.shift_bits)
         print(f"FINAL_ACCURACY:{acc}")
