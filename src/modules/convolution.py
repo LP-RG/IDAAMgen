@@ -25,7 +25,8 @@ class Conv2d_custom(nn.Conv2d):
                 bit_width,
                 multiplier_matrix,
                 signed = False,
-                name = None):
+                name = None,
+                shift_bits = 0):
         
         super().__init__(channel_in,channel_out,kernel_size,stride,padding,bias = bias)
         
@@ -54,6 +55,8 @@ class Conv2d_custom(nn.Conv2d):
         self.output_observer = EMAMSEObserver(**observer_args)
         self.bit_width = bit_width
         self.multiplier_matrix = multiplier_matrix
+        self.shift_bits = shift_bits
+
         self.calibrating = False
         
         self.name = name
@@ -114,8 +117,8 @@ class Conv2d_custom(nn.Conv2d):
             """input_int = quantization.signed_quantization(input, self.activation_scale, self.activation_quant_max)
             weight_int = quantization.signed_quantization(self.weight, self.weight_scale, self.weight_quant_max)"""
         else:
-            input_int = quantization.unsigned_quantization(input, self.activation_scale, self.activation_zp_neg, self.bit_width)
-            weight_int = quantization.unsigned_quantization(self.weight, self.weight_scale, self.weight_zp_neg, self.bit_width)   
+            input_int = quantization.unsigned_quantization(input, self.activation_scale, self.activation_zp_neg, self.activation_quant_max)
+            weight_int = quantization.unsigned_quantization(self.weight, self.weight_scale, self.weight_zp_neg, self.weight_quant_max)
         out =  self.conv2d_op.apply(input,
                             self.weight,
                             input_int,
@@ -130,5 +133,6 @@ class Conv2d_custom(nn.Conv2d):
                             self.signed,
                             self.bit_width,
                             self.name,
-                            self.multiplier_matrix)
+                            self.multiplier_matrix,
+                            self.shift_bits
         return quantization.simulate_industrial_rescaling(out, self.out_scale, self.out_zp_neg, self.bit_width)

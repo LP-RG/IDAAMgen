@@ -60,7 +60,7 @@ def normalize_model_name(model_name: str) -> str:
 
 
 def build_model(model_name: str, conv_type: int, bit_width: int, signed: bool, zone: bool,
-                multiplier_matrix=None, num_classes: int = 10):
+                multiplier_matrix=None, num_classes: int = 10, shift_bits = 0):
     if model_name not in MODEL_FACTORIES:
         raise ValueError(f"Model '{model_name}' not supported.")
     return MODEL_FACTORIES[model_name](
@@ -70,6 +70,7 @@ def build_model(model_name: str, conv_type: int, bit_width: int, signed: bool, z
         bit_width=bit_width,
         signed=signed,
         zone=zone,
+        shift_bits= shift_bits
     ).to(device)
 
 

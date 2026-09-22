@@ -22,6 +22,7 @@ class BasicBlock(nn.Module):
         bit_width=8,
         signed=False,
         name="0",
+        shift_bits = 0
     ):
         super().__init__()
 
@@ -29,7 +30,7 @@ class BasicBlock(nn.Module):
             in_channels, out_channels,
             kernel_size=3, stride=stride, padding=1, bias=False,
             conv_type=conv_type, bit_width=bit_width, signed=signed,
-            name=name + "_1", multiplier_matrix=multiplier_matrix,
+            name=name + "_1", multiplier_matrix=multiplier_matrix, shift_bits=shift_bits
         )
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU(inplace=True)
@@ -38,7 +39,7 @@ class BasicBlock(nn.Module):
             out_channels, out_channels,
             kernel_size=3, stride=1, padding=1, bias=False,
             conv_type=conv_type, bit_width=bit_width, signed=signed,
-            name=name + "_2", multiplier_matrix=multiplier_matrix,
+            name=name + "_2", multiplier_matrix=multiplier_matrix, shift_bits=shift_bits
         )
         self.bn2 = nn.BatchNorm2d(out_channels)
 
@@ -50,7 +51,7 @@ class BasicBlock(nn.Module):
                     in_channels, out_channels,
                     kernel_size=1, stride=stride, padding=0, bias=False,
                     conv_type=conv_type, bit_width=bit_width, signed=signed,
-                    name=name + "_s", multiplier_matrix=multiplier_matrix,
+                    name=name + "_s", multiplier_matrix=multiplier_matrix, shift_bits=shift_bits
                 ),
                 nn.BatchNorm2d(out_channels),
             )
@@ -75,9 +76,10 @@ class ResNet20(nn.Module):
         bit_width=8,
         signed=False,
         zone=False,
+        shift_bits = 0
     ):
         super().__init__()
-
+        print(shift_bits)
         # Primo layer non approssimato come da tua logica:
         # se conv_type != {1,5} usa 2 per il primo layer quando zone=True
         first_layer_conv_type = conv_type if (conv_type == 1 or conv_type == 5) else 2
@@ -87,7 +89,7 @@ class ResNet20(nn.Module):
         self.conv1 = cc.Conv2d_custom(
             3, 16, kernel_size=3, stride=1, padding=1, bias=False,
             conv_type=conv1_type, bit_width=bit_width, signed=signed,
-            name="s", multiplier_matrix=multiplier_matrix,
+            name="s", multiplier_matrix=multiplier_matrix, shift_bits= shift_bits
         )
         self.bn1 = nn.BatchNorm2d(16)
         self.relu = nn.ReLU(inplace=True)
@@ -96,17 +98,17 @@ class ResNet20(nn.Module):
         self.layer1 = self._make_layer(
             block=BasicBlock, in_channels=16, out_channels=16, blocks=3, stride=1,
             base_name="1", multiplier_matrix=multiplier_matrix,
-            conv_type=conv_type, bit_width=bit_width, signed=signed,
+            conv_type=conv_type, bit_width=bit_width, signed=signed,shift_bits= shift_bits
         )
         self.layer2 = self._make_layer(
             block=BasicBlock, in_channels=16, out_channels=32, blocks=3, stride=2,
             base_name="2", multiplier_matrix=multiplier_matrix,
-            conv_type=conv_type, bit_width=bit_width, signed=signed,
+            conv_type=conv_type, bit_width=bit_width, signed=signed,shift_bits= shift_bits
         )
         self.layer3 = self._make_layer(
             block=BasicBlock, in_channels=32, out_channels=64, blocks=3, stride=2,
             base_name="3", multiplier_matrix=multiplier_matrix,
-            conv_type=conv_type, bit_width=bit_width, signed=signed,
+            conv_type=conv_type, bit_width=bit_width, signed=signed,shift_bits= shift_bits
         )
 
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
@@ -119,7 +121,7 @@ class ResNet20(nn.Module):
 
     def _make_layer(
         self, block, in_channels, out_channels, blocks, stride, base_name,
-        multiplier_matrix, conv_type, bit_width, signed,
+        multiplier_matrix, conv_type, bit_width, signed,shift_bits
     ):
         layers = []
         # primo blocco può fare downsample
@@ -132,6 +134,7 @@ class ResNet20(nn.Module):
             bit_width=bit_width,
             signed=signed,
             name=f"{base_name}a",
+            shift_bits=shift_bits
         ))
         # blocchi rimanenti a stride 1
         for i in range(1, blocks):
@@ -145,6 +148,7 @@ class ResNet20(nn.Module):
                 bit_width=bit_width,
                 signed=signed,
                 name=f"{base_name}{suffix}",
+                shift_bits=shift_bits
             ))
         return nn.Sequential(*layers)
 

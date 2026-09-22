@@ -88,30 +88,49 @@ def approx_convolution(input, weight, bias, stride, act_scale, weight_scale, act
     del res_matrix
     return output
 
-def quantized_convolution(input, weight, bias, stride, act_scale, weight_scale, activation_zp, weight_zp, signed, stats = False, bit_width = 0, name = None):
+def quantized_convolution(input, weight, bias, stride, act_scale, weight_scale, activation_zp, weight_zp,
+                           signed, stats=False, bit_width=0, name=None, shift_bits=0):
     batch_size, _, in_height, in_width = input.size()
     out_channels, _, weight_height, weight_width = weight.size()
 
     heat_map = None
-    if(stats):
+    if stats:
         if os.path.isfile(heat_map_path + name + ".npy"):
             heat_map = torch.from_numpy(np.load(heat_map_path + name + ".npy")).float().to("cuda")
         else:
-            heat_map = torch.zeros((out_channels, 2**bit_width, 2**bit_width), dtype = torch.float32).to("cuda")
+            heat_map = torch.zeros((out_channels, 2**bit_width, 2**bit_width), dtype=torch.float32).to("cuda")
 
+    # Riduce operandi da 8 a (8 - shift_bits) bit effettivi, per emulare il moltiplicatore a y bit
+    # mantenendo il contenitore int8 richiesto dal kernel 8x8.
+    # I tensori arrivano come float che rappresentano interi -> cast esplicito a int prima dello shift.
+    if shift_bits > 0:
+        input_dtype = input.dtype
+        weight_dtype = weight.dtype
+
+        int_dtype = torch.int32  # margine sufficiente per valori int8 con zero-point
+
+        input_int = input.to(int_dtype)
+        weight_int = weight.to(int_dtype)
+        input_int = torch.div(input_int, 2**shift_bits, rounding_mode='trunc') if signed \
+            else torch.bitwise_right_shift(input_int, shift_bits)
+        weight_int = torch.div(weight_int, 2**shift_bits, rounding_mode='trunc') if signed \
+            else torch.bitwise_right_shift(weight_int, shift_bits)
+
+        input = input_int.to(input_dtype)
+        weight = weight_int.to(weight_dtype)
 
     input_unfolded = nn.functional.unfold(input, kernel_size=(weight_height, weight_width), stride=stride)
     kernel_flatten = weight.view(out_channels, -1)
-    #print(heat_map.dtype)
-    output =  torch.ops.mat_mul.matmul_no_error_cuda(
-        input_unfolded.transpose(1, 2).contiguous(), kernel_flatten.T.contiguous(), heat_map, act_scale, activation_zp, weight_scale, weight_zp, bit_width, signed
-    ).transpose(1, 2)
 
+    output = torch.ops.mat_mul.matmul_no_error_cuda(
+        input_unfolded.transpose(1, 2).contiguous(), kernel_flatten.T.contiguous(),
+        heat_map, act_scale, activation_zp, weight_scale, weight_zp, bit_width, signed, shift_bits
+    ).transpose(1, 2)
     output_height = (in_height - weight_height) // stride[0] + 1
     output_width = (in_width - weight_width) // stride[1] + 1
     output = output.view(batch_size, out_channels, output_height, output_width)
 
-    if(stats):
+    if stats:
         heat_map = heat_map.to("cpu")
         np.save(heat_map_path + name + ".npy", heat_map)
     if bias is not None:
@@ -124,7 +143,7 @@ def quantized_convolution(input, weight, bias, stride, act_scale, weight_scale, 
 class ApproxConv2d(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, input, weight, int_input, int_weight, bias, stride, padding, act_scale, weight_scale, activation_zp, weight_zp, signed, bit_width, _, multiplier_matrix):
+    def forward(ctx, input, weight, int_input, int_weight, bias, stride, padding, act_scale, weight_scale, activation_zp, weight_zp, signed, bit_width, _, multiplier_matrix, bit_shift =0):
         ctx.stride = stride
         ctx.padding = padding
         input_padded = nn.ZeroPad2d((padding[1], padding[1], padding[0], padding[0]))(int_input)
@@ -164,7 +183,7 @@ class ApproxConv2d(torch.autograd.Function):
 class ApproxConv2dSTE(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, input, weight, int_input, int_weight, bias, stride, padding, act_scale, weight_scale, activation_zp, weight_zp, signed, bit_width, _, multiplier_matrix):
+    def forward(ctx, input, weight, int_input, int_weight, bias, stride, padding, act_scale, weight_scale, activation_zp, weight_zp, signed, bit_width, _, multiplier_matrix, shift_bits =0):
         ctx.stride = stride
         ctx.padding = padding
         input_padded = nn.ZeroPad2d((padding[1], padding[1], padding[0], padding[0]))(int_input)
@@ -196,13 +215,13 @@ class ApproxConv2dSTE(torch.autograd.Function):
             input.shape , weight + weight_zp, grad_output, stride, padding
         )   
 
-        return grad_input, grad_weight, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return grad_input, grad_weight, None, None, None, None, None, None, None, None, None, None, None, None, None, None
     
     
 class QuantizedConv2d(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, input, weight, int_input, int_weight, bias, stride, padding, act_scale, weight_scale, activation_zp, weight_zp, signed, _, __, ___):
+    def forward(ctx, input, weight, int_input, int_weight, bias, stride, padding, act_scale, weight_scale, activation_zp, weight_zp, signed, _, __, ___, shift_bits =0):
         ctx.stride = stride
         ctx.padding = padding
         input_padded = nn.ZeroPad2d((padding[1], padding[1], padding[0], padding[0]))(int_input)
@@ -212,7 +231,7 @@ class QuantizedConv2d(torch.autograd.Function):
         if(not signed):
             ctx.activation_zp = activation_zp
             ctx.weight_zp = weight_zp
-        return quantized_convolution(input_padded, int_weight, bias, stride, act_scale, weight_scale, activation_zp, weight_zp, signed)
+        return quantized_convolution(input_padded, int_weight, bias, stride, act_scale, weight_scale, activation_zp, weight_zp, signed, shift_bits = shift_bits)
     
     @staticmethod
     def backward(ctx, grad_output):
@@ -235,13 +254,13 @@ class QuantizedConv2d(torch.autograd.Function):
             input.shape , weight + weight_zp, grad_output, stride, padding
         )   
 
-        return grad_input, grad_weight, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return grad_input, grad_weight, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 class StatsQuantizedConv2d(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, input, weight, int_input, int_weight, bias, stride, padding, act_scale, weight_scale, activation_zp, weight_zp, signed, bit_width, name, _):
+    def forward(ctx, input, weight, int_input, int_weight, bias, stride, padding, act_scale, weight_scale, activation_zp, weight_zp, signed, bit_width, name, _,shift_bits= 0):
         ctx.stride = stride
         ctx.padding = padding
         input_padded = nn.ZeroPad2d((padding[1], padding[1], padding[0], padding[0]))(int_input)
@@ -251,7 +270,7 @@ class StatsQuantizedConv2d(torch.autograd.Function):
         if(not signed):
             ctx.activation_zp = activation_zp
             ctx.weight_zp = weight_zp
-        return quantized_convolution(input_padded, int_weight, bias, stride, act_scale, weight_scale, activation_zp, weight_zp, signed, stats=True, bit_width= bit_width, name = name)
+        return quantized_convolution(input_padded, int_weight, bias, stride, act_scale, weight_scale, activation_zp, weight_zp, signed, stats=True, bit_width= bit_width, name = name, shift_bits = shift_bits)
     
     @staticmethod
     def backward(ctx, grad_output):
@@ -274,4 +293,4 @@ class StatsQuantizedConv2d(torch.autograd.Function):
             input.shape , weight + weight_zp, grad_output, stride, padding
         )   
 
-        return grad_input, grad_weight, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return grad_input, grad_weight, None, None, None, None, None, None, None, None, None, None, None, None, None, None
