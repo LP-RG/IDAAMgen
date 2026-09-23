@@ -2,7 +2,7 @@
 #include <torch/extension.h>
 #include <cmath>
 
-#define TILE_SIZE 16
+#define TILE_SIZE 32
 
 namespace mat_mul{
 

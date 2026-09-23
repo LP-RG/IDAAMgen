@@ -5,7 +5,7 @@ from torch import nn
 import modules.functions as functions
 import modules.quantization as quantization
 
-from mqbench.observer import MSEObserver,EMAMSEObserver,MinMaxObserver
+from mqbench.observer import MSEObserver, EMAMSEObserver, MinMaxObserver
 
 # Conv Type list:
 # - 1 : standard convolution
@@ -13,22 +13,35 @@ from mqbench.observer import MSEObserver,EMAMSEObserver,MinMaxObserver
 # - 3 : quantized convolution error STE gradient
 # - 4 : quantized convolution error aware gradient
 
-#TODO Rendere parametrico anche matrice di approx_mult
 class Conv2d_custom(nn.Conv2d):
-    def __init__(self,channel_in,
-                channel_out,
-                kernel_size,
-                stride,
-                padding,
-                bias,
-                conv_type,
-                bit_width,
-                multiplier_matrix,
-                signed = False,
-                name = None,
-                shift_bits = 0):
-        
-        super().__init__(channel_in,channel_out,kernel_size,stride,padding,bias = bias)
+    def __init__(
+        self,
+        channel_in: int,
+        channel_out: int,
+        kernel_size,
+        stride=1,
+        padding=0,
+        bias: bool = True,
+        conv_type: int = 1,
+        bit_width: int = 8,
+        multiplier_matrix=None,
+        signed: bool = False,
+        name: str = None,
+        shift_bits: int = 0,
+        groups: int = 1,        
+        dilation=1,             
+        **kwargs                
+    ):
+        super().__init__(
+            in_channels=channel_in,
+            out_channels=channel_out,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=groups,
+            bias=bias,
+        )
         
         self.register_buffer('activation_scale', torch.tensor(1.0))
         self.register_buffer('activation_zp_neg', torch.tensor(0.0))
@@ -61,18 +74,18 @@ class Conv2d_custom(nn.Conv2d):
         
         self.name = name
         self.conv_type = conv_type
-        if(conv_type == 1):
+        if conv_type == 1:
             self.conv2d_op = None
-        elif(conv_type == 2):
+        elif conv_type == 2:
             self.conv2d_op = functions.QuantizedConv2d
-        elif(conv_type == 3):
+        elif conv_type == 3:
             self.conv2d_op = functions.ApproxConv2dSTE
-        elif(conv_type == 4):
+        elif conv_type == 4:
             self.conv2d_op = functions.ApproxConv2d
-        elif(conv_type == 5):
+        elif conv_type == 5:
             self.conv2d_op = functions.StatsQuantizedConv2d
         else:
-            raise(NotImplementedError) 
+            raise (NotImplementedError)
 
     def freeze_qparams(self):
         act_scale, act_zp = self.activation_observer.calculate_qparams()
@@ -86,53 +99,58 @@ class Conv2d_custom(nn.Conv2d):
         self.out_scale.copy_(out_scale.squeeze())
         self.out_zp_neg.copy_(-out_zp.squeeze())
 
-
         self.calibrating = False
 
-    """ if(self.training and self.conv_type == 5):
-            self.conv2d_op = functions.QuantizedConv2d
-        elif(not self.training and (self.conv_type == 5)):
-            self.conv2d_op = functions.StatsQuantizedConv2d
-        if(self.conv2d_op == None):
-            return nn.functional.conv2d(input=input, 
-                                        weight=self.weight,
-                                        bias=self.bias,
-                                        stride=self.stride,
-                                        padding=self.padding)"""
     def forward(self, input):
         if self.conv_type == 1 or self.conv2d_op is None:
-            return nn.functional.conv2d(input, self.weight, self.bias,
-                                        self.stride, self.padding)
+            return nn.functional.conv2d(
+                input, self.weight, self.bias,
+                self.stride, self.padding, self.dilation, self.groups
+            )
 
         if self.calibrating:
             self.activation_observer(input)
             self.weight_observer(self.weight)
-            out = nn.functional.conv2d(input, self.weight, self.bias,
-                                        self.stride, self.padding)
+            out = nn.functional.conv2d(
+                input, self.weight, self.bias,
+                self.stride, self.padding, self.dilation, self.groups
+            )
             self.output_observer(out)  
             return out                           
+
         if self.signed:
             print("NOT IMPLEMENTED YET")
             return
             """input_int = quantization.signed_quantization(input, self.activation_scale, self.activation_quant_max)
             weight_int = quantization.signed_quantization(self.weight, self.weight_scale, self.weight_quant_max)"""
         else:
-            input_int = quantization.unsigned_quantization(input, self.activation_scale, self.activation_zp_neg, self.activation_quant_max)
-            weight_int = quantization.unsigned_quantization(self.weight, self.weight_scale, self.weight_zp_neg, self.weight_quant_max)
-        out =  self.conv2d_op.apply(input,
-                            self.weight,
-                            input_int,
-                            weight_int,
-                            self.bias, 
-                            self.stride, 
-                            self.padding,
-                            self.activation_scale,
-                            self.weight_scale,
-                            self.activation_zp_neg,
-                            self.weight_zp_neg,
-                            self.signed,
-                            self.bit_width,
-                            self.name,
-                            self.multiplier_matrix,
-                            self.shift_bits
-        return quantization.simulate_industrial_rescaling(out, self.out_scale, self.out_zp_neg, self.bit_width)
+            input_int = quantization.unsigned_quantization(
+                input, self.activation_scale, self.activation_zp_neg, self.bit_width
+            )
+            weight_int = quantization.unsigned_quantization(
+                self.weight, self.weight_scale, self.weight_zp_neg, self.bit_width
+            )
+
+        
+        out = self.conv2d_op.apply(
+            input,
+            self.weight,
+            input_int,
+            weight_int,
+            self.bias, 
+            self.stride, 
+            self.padding,
+            self.activation_scale,
+            self.weight_scale,
+            self.activation_zp_neg,
+            self.weight_zp_neg,
+            self.signed,
+            self.bit_width,
+            self.name,
+            self.multiplier_matrix,
+            self.shift_bits,
+            self.dilation, 
+            self.groups,   
+        )
+        return out
+        #return quantization.simulate_industrial_rescaling(out, self.out_scale, self.out_zp_neg, self.bit_width)
