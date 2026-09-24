@@ -1,11 +1,11 @@
+import os
 import torch
 import numpy as np
 from torch import nn
-#import modules.observers as observers
 import modules.functions as functions
 import modules.quantization as quantization
+from mqbench import observer
 
-from mqbench.observer import MSEObserver, EMAMSEObserver, MinMaxObserver
 
 # Conv Type list:
 # - 1 : standard convolution
@@ -63,15 +63,14 @@ class Conv2d_custom(nn.Conv2d):
             "quant_min": quant_min,
             "quant_max": quant_max,
         }
-        self.activation_observer = EMAMSEObserver(**observer_args)
-        self.weight_observer = MSEObserver(**observer_args)
-        self.output_observer = EMAMSEObserver(**observer_args)
+        self.activation_observer = observer.EMAMSEObserver(**observer_args)
+        self.weight_observer = observer.MSEObserver(**observer_args)
+        self.output_observer = observer.EMAMSEObserver(**observer_args)
         self.bit_width = bit_width
         self.multiplier_matrix = multiplier_matrix
         self.shift_bits = shift_bits
 
         self.calibrating = False
-        
         self.name = name
         self.conv_type = conv_type
         if conv_type == 1:

@@ -121,8 +121,14 @@ def get_imagenet(batch_size: int, data_root: str = "./data/tiny-imagenet-200", i
     test_dataset.samples = aligned_samples
     test_dataset.targets = [s[1] for s in aligned_samples]
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, **kwargs)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False, **kwargs)
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True,
+        generator=g, worker_init_fn=seed_worker, **kwargs
+    )
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False,
+        worker_init_fn=seed_worker, **kwargs
+    )
 
     return train_loader, test_loader, len(train_dataset.classes)
 

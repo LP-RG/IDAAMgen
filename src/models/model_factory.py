@@ -6,10 +6,6 @@ import torch.nn as nn
 import modules.convolution as cc  # Modulo custom con Conv2d_custom
 
 
-# ---------------------------------------------------------------------------
-# Conv builder: gestisce i parametri custom di Conv2d_custom (incluso groups)
-# ---------------------------------------------------------------------------
-
 def make_conv_builder(conv_defaults: dict) -> Callable[..., nn.Module]:
     def _build(in_channels, out_channels, kernel_size, stride=1, padding=0, bias=True, groups=1, name="", **overrides):
         params = {**conv_defaults, **overrides}
@@ -20,9 +16,6 @@ def make_conv_builder(conv_defaults: dict) -> Callable[..., nn.Module]:
     return _build
 
 
-# ---------------------------------------------------------------------------
-# Building Blocks Principali per il Subset SOTA
-# ---------------------------------------------------------------------------
 
 class BasicBlock(nn.Module):
     """ResNet CIFAR (ResNet-20): Basic Block 3x3 -> 3x3."""
@@ -181,14 +174,14 @@ class ConvNeXtBlock(nn.Module):
     def forward(self, x):
         residual = x
         x = self.dwconv(x)
-        x = x.permute(0, 2, 3, 1)  # NCHW -> NHWC per LayerNorm e Linear
+        x = x.permute(0, 2, 3, 1)  
         x = self.norm(x)
         x = self.pwconv1(x)
         x = self.act(x)
         x = self.pwconv2(x)
         if self.gamma is not None:
             x = self.gamma * x
-        x = x.permute(0, 3, 1, 2)  # NHWC -> NCHW
+        x = x.permute(0, 3, 1, 2)  
         return residual + x
 
 

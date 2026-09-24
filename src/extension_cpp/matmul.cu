@@ -309,7 +309,6 @@ namespace mat_mul{
 
         int res_dim = std::pow(2, bit_width);
         int res_offeset = std::pow(2, bit_width - 1);
-
         float activations_sum = 0.0f;
         float weights_sum = 0.0f;
         float sum = 0.0f;
@@ -398,7 +397,6 @@ namespace mat_mul{
     __global__ void matmul_no_error_cuda_kernel(const float* __restrict__ A, 
                                             const float* __restrict__ B, 
                                             float* __restrict__ C, 
-                                            float* __restrict__ heat_map, 
                                             int M,
                                             int N, 
                                             int K, 
@@ -458,10 +456,6 @@ namespace mat_mul{
                 activations_sum += a_val_recon;
                 weights_sum += b_val_recon;
                 sum += a_val_recon * b_val_recon;
-                if(heat_map != nullptr){
-                    int heat_map_dim = std::pow(2, bit_width);
-                    heat_map[col * heat_map_dim * heat_map_dim + (__float2int_rn(a_val_sign)) * heat_map_dim + (__float2int_rn(b_val_sign))] += 1.0f;
-                }
             }
 
             __syncthreads();
@@ -479,7 +473,7 @@ namespace mat_mul{
     }
 
 
-    torch::Tensor matmul_no_error_cuda(torch::Tensor A, torch::Tensor B, torch::Tensor heat_map, double act_scale, double act_min, double weight_scale, double weight_min, int64_t bit_width, bool sign_unsign, int64_t shift_bits) {
+    torch::Tensor matmul_no_error_cuda(torch::Tensor A, torch::Tensor B, double act_scale, double act_min, double weight_scale, double weight_min, int64_t bit_width, bool sign_unsign, int64_t shift_bits) {
         const int batch_size = A.size(0);
         const int M = A.size(1);
         const int K = A.size(2);
@@ -487,15 +481,11 @@ namespace mat_mul{
         auto C = torch::zeros({batch_size, M, N}, torch::TensorOptions().device(A.device()).dtype(A.dtype()));
         dim3 blockDim(TILE_SIZE, TILE_SIZE);
         dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE, batch_size);
-        float* heat_map_data = nullptr;
-        if(heat_map.defined()){
-            heat_map_data = heat_map.data_ptr<float>();
-        }
+        
         matmul_no_error_cuda_kernel<<<gridDim, blockDim>>>(
             A.data_ptr<float>(), 
             B.data_ptr<float>(),
             C.data_ptr<float>(), 
-            heat_map_data,
             M, N, K,
             static_cast<float>(act_scale),
             static_cast<float>(act_min),
@@ -508,6 +498,131 @@ namespace mat_mul{
         cudaDeviceSynchronize();
         return C;
     }
+    
+    
+    __global__ void matmul_stats_kernel(const float* __restrict__ A,
+                                     const float* __restrict__ B,
+                                     const float* __restrict__ res_matrix,
+                                     float* __restrict__ C,
+                                     float* __restrict__ heat_map, 
+                                     int M, int N, int K,
+                                     float act_scale, float act_min,
+                                     float weight_scale, float weight_min,
+                                     int bit_width, bool sign_unsign, bool approx) {
+    __shared__ float tile_A[TILE_SIZE][TILE_SIZE];
+    __shared__ float tile_B[TILE_SIZE][TILE_SIZE];
+
+        int row = blockIdx.y * TILE_SIZE + threadIdx.y;
+        int col = blockIdx.x * TILE_SIZE + threadIdx.x;   
+        int batch = blockIdx.z;
+
+        A += batch * M * K;
+        C += batch * M * N;
+
+        float sum = 0.0f;
+        float activations_sum = 0.0f;
+        float weights_sum = 0.0f;
+
+        const int res_dim = 1 << bit_width;
+
+        for (int t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; ++t) {
+            int tiledRow = row;
+            int tiledCol = t * TILE_SIZE + threadIdx.x;
+
+            if (tiledRow < M && tiledCol < K) {
+                tile_A[threadIdx.y][threadIdx.x] = A[tiledRow * K + tiledCol];
+            } else {
+                tile_A[threadIdx.y][threadIdx.x] = 0.0f;
+            }
+
+            tiledRow = t * TILE_SIZE + threadIdx.y;
+            tiledCol = col;
+
+            if (tiledRow < K && tiledCol < N) {
+                tile_B[threadIdx.y][threadIdx.x] = B[tiledRow * N + tiledCol];
+            } else {
+                tile_B[threadIdx.y][threadIdx.x] = 0.0f;
+            }
+
+            __syncthreads();
+
+            #pragma unroll 8
+            for (int k = 0; k < TILE_SIZE; ++k) {
+                int global_k = t * TILE_SIZE + k;
+                
+                if (global_k >= K) continue;
+
+                float a_val_sign = tile_A[threadIdx.y][k];
+                float b_val_sign = tile_B[k][threadIdx.x];
+                activations_sum += a_val_sign;
+                weights_sum += b_val_sign;
+
+                int a_idx = __float2int_rn(a_val_sign);
+                int b_idx = __float2int_rn(b_val_sign);
+
+                if (approx) {
+                    if (a_idx < res_dim && b_idx < res_dim) {
+                        sum += res_matrix[a_idx * res_dim + b_idx];
+                    }
+                } else {
+                    sum += a_val_sign * b_val_sign;
+                }
+
+                if (heat_map != nullptr && row < M && col < N) {
+                    if (a_idx < res_dim && b_idx < res_dim) {
+                        long long idx = (long long)col * res_dim * res_dim +
+                                        (long long)a_idx * res_dim + b_idx;
+                        atomicAdd(&heat_map[idx], 1.0f);
+                    }
+                }
+            }
+            __syncthreads();
+        }
+
+        if (row < M && col < N) {
+            C[row * N + col] = act_scale * weight_scale *
+                (sum + activations_sum * weight_min + weights_sum * act_min +
+                act_min * weight_min * K);
+        }
+    }
+
+    torch::Tensor matmul_stats(torch::Tensor A, torch::Tensor B, torch::Tensor res,
+                                torch::Tensor heat_map, double act_scale,
+                                double act_min, double weight_scale,
+                                double weight_min, int64_t bit_width,
+                                bool sign_unsign, bool approx) {
+        const int batch_size = A.size(0);
+        const int M = A.size(1);
+        const int K = A.size(2);
+        const int N = B.size(1);
+        auto C = torch::zeros({batch_size, M, N},
+                            torch::TensorOptions().device(A.device()).dtype(A.dtype()));
+        dim3 blockDim(TILE_SIZE, TILE_SIZE);
+        dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE,
+                    (M + TILE_SIZE - 1) / TILE_SIZE, batch_size);
+        float* res_ptr = nullptr;
+        if (res.defined()) {
+            res_ptr = res.data_ptr<float>();
+        }
+        matmul_stats_kernel<<<gridDim, blockDim>>>(
+            A.data_ptr<float>(),
+            B.data_ptr<float>(),
+            res_ptr,
+            C.data_ptr<float>(),
+            heat_map.data_ptr<float>(),
+            M, N, K,
+            static_cast<float>(act_scale),
+            static_cast<float>(act_min),
+            static_cast<float>(weight_scale),
+            static_cast<float>(weight_min),
+            bit_width,
+            sign_unsign,
+            approx
+        );
+        return C;
+    }
+
+
 
     PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {}
 
@@ -517,7 +632,8 @@ namespace mat_mul{
         m.def("derivate_input(Tensor a, Tensor b, Tensor c, Tensor d, int weight_zp, int bit_width, bool signed) -> (Tensor)");
         m.def("derivate_weight(Tensor a, Tensor b, Tensor c, Tensor d, int act_zp, int bit_width, bool signed) -> (Tensor)");
         m.def("matmul_cuda(Tensor a, Tensor b, Tensor c, float act_scale, float act_min, float weight_scale, float weight_min,int bit_width, bool signed) -> (Tensor)");
-        m.def("matmul_no_error_cuda(Tensor a, Tensor b, Tensor heat_map, float act_scale, float act_min, float weight_scale, float weight_min, int bit_width, bool signed, int shifts_bits) -> (Tensor)");
+        m.def("matmul_no_error_cuda(Tensor a, Tensor b, float act_scale, float act_min, float weight_scale, float weight_min, int bit_width, bool signed, int shifts_bits) -> (Tensor)");
+        m.def("matmul_stats(Tensor a, Tensor b, Tensor c, Tensor heat_map, float act_scale, float act_min, float weight_scale, float weight_min,int bit_width, bool signed, bool approx) -> (Tensor)");
     }
 
     TORCH_LIBRARY_IMPL(mat_mul, CUDA, m) {
@@ -527,6 +643,7 @@ namespace mat_mul{
         m.impl("derivate_weight", &derivate_weight);
         m.impl("matmul_cuda", &matmul_cuda);
         m.impl("matmul_no_error_cuda", &matmul_no_error_cuda);
+        m.impl("matmul_stats", &matmul_stats);
     }
 }
 

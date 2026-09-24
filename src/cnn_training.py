@@ -33,18 +33,15 @@ batch_size = 64
 dataset_name = None
 
 
-def calibration(model: nn.Module, stats: bool = False):
+def calibration(model: nn.Module):
     """Calibra attivazioni e pesi del modello usando il training set."""
     print("Calibrating model...")
 
+    model.train()
+
     for m in model.modules():
         if isinstance(m, conv.Conv2d_custom):
-            m.calibrating = not stats
-
-    if stats:
-        model.eval()
-    else:
-        model.train()
+            m.calibrating = True
 
     with torch.no_grad():
         for i, (inputs, _) in enumerate(train_loader):
@@ -53,12 +50,19 @@ def calibration(model: nn.Module, stats: bool = False):
             inputs = inputs.to(device)
             model(inputs)
 
-    if not stats:
-        for m in model.modules():
-            if isinstance(m, conv.Conv2d_custom):
-                m.freeze_qparams()
 
+    for m in model.modules():
+        if isinstance(m, conv.Conv2d_custom):
+            m.freeze_qparams()
 
+def get_stats(model):
+    print("getting input_distribution")
+    model.eval()
+    with torch.no_grad():
+        for inputs, _ in train_loader:
+            inputs = inputs.to(device)
+            model(inputs)
+            
 def set_data_loaders(model_name: str, cli_dataset_name: str = None):
     """
     Seleziona automaticamente il dataset, la dimensione dell'immagine (32x32 vs 224x224) 
@@ -336,7 +340,7 @@ def new_training_method(
         )
         model.load_state_dict(torch.load(quant_path, map_location=device, weights_only=True))
         calibration(model)
-        calibration(model, stats=True)
+        get_stats(model)
         print("Calibration statistics collection completed successfully.")
         return None
 

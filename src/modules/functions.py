@@ -107,7 +107,7 @@ def gradient_error_weights(input, kernel, grad_output, stride, activation_zp, bi
     return output
 
 
-# ********************* Forward Methods  *********************
+# ********************* Forward Methods *********************
 
 def approx_convolution(input, weight, bias, stride, act_scale, weight_scale, activation_zp, weight_zp, 
                        signed, bit_width, multiplier_matrix, dilation=1, groups=1):
@@ -161,6 +161,7 @@ def approx_convolution(input, weight, bias, stride, act_scale, weight_scale, act
 
     if bias is not None:
         output.add_(bias.view(1, out_channels, 1, 1))
+        
     del res_matrix
     return output
 
@@ -170,14 +171,6 @@ def quantized_convolution(input, weight, bias, stride, act_scale, weight_scale, 
     batch_size, in_channels, in_height, in_width = input.size()
     out_channels, in_channels_per_group, weight_height, weight_width = weight.size()
     out_channels_per_group = out_channels // groups
-
-    heat_map = None
-    if stats:
-        if os.path.isfile(heat_map_path + name + ".npy"):
-            heat_map = torch.from_numpy(np.load(heat_map_path + name + ".npy")).float().to("cuda")
-        else:
-            heat_map = torch.zeros((out_channels, 2**bit_width, 2**bit_width), dtype=torch.float32).to("cuda")
-
     if shift_bits > 0:
         input_dtype = input.dtype
         weight_dtype = weight.dtype
@@ -215,12 +208,11 @@ def quantized_convolution(input, weight, bias, stride, act_scale, weight_scale, 
         )
         kernel_flatten = weight_groups[g].view(out_channels_per_group, -1)
 
-        heat_map_g = heat_map[g * out_channels_per_group : (g + 1) * out_channels_per_group] if stats else None
 
         out_g = torch.ops.mat_mul.matmul_no_error_cuda(
             input_unfolded.transpose(1, 2).contiguous(), 
             kernel_flatten.T.contiguous(),
-            heat_map_g, act_scale, activation_zp, weight_scale, weight_zp, bit_width, signed, shift_bits
+            act_scale, activation_zp, weight_scale, weight_zp, bit_width, signed, shift_bits
         ).transpose(1, 2)
 
         out_g = out_g.view(batch_size, out_channels_per_group, output_height, output_width)
@@ -228,13 +220,70 @@ def quantized_convolution(input, weight, bias, stride, act_scale, weight_scale, 
 
     output = torch.cat(output_groups, dim=1)
 
-    if stats:
-        heat_map = heat_map.to("cpu")
-        np.save(heat_map_path + name + ".npy", heat_map)
     if bias is not None:
         output.add_(bias.view(1, out_channels, 1, 1))
     return output
 
+
+def stats_convolution(input, weight, bias, stride, act_scale, weight_scale, activation_zp, weight_zp,
+                       signed, bit_width=0, name=None, multiplier_matrix=None, dilation=1, groups=1):
+    batch_size, in_channels, in_height, in_width = input.size()
+    out_channels, in_channels_per_group, weight_height, weight_width = weight.size()
+    out_channels_per_group = out_channels // groups
+
+    try:
+        approx = True
+        res_matrix = torch.from_numpy(np.load(multiplier_matrix)).float().to("cuda").contiguous()
+    except:
+        approx = False
+        res_matrix = None
+
+    dil_h, dil_w = (dilation, dilation) if isinstance(dilation, int) else dilation
+    str_h, str_w = (stride, stride) if isinstance(stride, int) else stride
+
+    eff_kernel_h = weight_height + (weight_height - 1) * (dil_h - 1)
+    eff_kernel_w = weight_width + (weight_width - 1) * (dil_w - 1)
+
+    output_height = (in_height - eff_kernel_h) // str_h + 1
+    output_width = (in_width - eff_kernel_w) // str_w + 1
+
+    if os.path.isfile(heat_map_path + name + ".npy"):
+        heat_map = torch.from_numpy(np.load(heat_map_path + name + ".npy")).float().to("cuda")
+    else:
+        heat_map = torch.zeros((out_channels, 2**bit_width, 2**bit_width), dtype=torch.float32).to("cuda")
+
+    input_groups = torch.chunk(input, groups, dim=1)
+    weight_groups = torch.chunk(weight, groups, dim=0)
+    output_groups = []
+
+    for g in range(groups):
+        input_unfolded = nn.functional.unfold(
+            input_groups[g],
+            kernel_size=(weight_height, weight_width),
+            dilation=dilation,
+            stride=stride
+        )
+        kernel_flatten = weight_groups[g].view(out_channels_per_group, -1)
+
+        heat_map_g = heat_map[g * out_channels_per_group:(g + 1) * out_channels_per_group]
+
+        out_g = torch.ops.mat_mul.matmul_stats(
+            input_unfolded.transpose(1, 2).contiguous(),
+            kernel_flatten.T.contiguous(),
+            res_matrix, heat_map_g,
+            act_scale, activation_zp, weight_scale, weight_zp, bit_width, signed, approx
+        ).transpose(1, 2)
+
+        out_g = out_g.view(batch_size, out_channels_per_group, output_height, output_width)
+        output_groups.append(out_g)
+
+    output = torch.cat(output_groups, dim=1)
+    torch.cuda.synchronize()
+    np.save(heat_map_path + name + ".npy", heat_map.to("cpu").numpy())
+
+    if bias is not None:
+        output.add_(bias.view(1, out_channels, 1, 1))
+    return output
 
 # ********************* Functions Definition *********************
 
@@ -242,53 +291,50 @@ class ApproxConv2d(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input, weight, int_input, int_weight, bias, stride, padding, act_scale, weight_scale, 
-                activation_zp, weight_zp, signed, bit_width, name, multiplier_matrix, shift_bits=0, dilation=1, groups=1):
+                activation_zp_neg, weight_zp_neg, signed, bit_width, name, multiplier_matrix, shift_bits=0, dilation=1, groups=1):
         ctx.stride = stride
         ctx.padding = padding
         ctx.dilation = dilation
         ctx.groups = groups
         
         pad_h, pad_w = (padding, padding) if isinstance(padding, int) else padding
-        input_padded = nn.ZeroPad2d((pad_w, pad_w, pad_h, pad_h))(int_input)
+        input_padded = nn.functional.pad(
+            int_input, (pad_w, pad_w, pad_h, pad_h), value=-activation_zp_neg.item()
+        ) if (pad_h > 0 or pad_w > 0) else int_input
         
         ctx.save_for_backward(input_padded, int_weight, bias)
         ctx.act_scale = act_scale
         ctx.weight_scale = weight_scale
         ctx.bit_width = bit_width
         ctx.signed = signed
-        if not signed:
-            ctx.activation_zp = activation_zp
-            ctx.weight_zp = weight_zp
-            
+        ctx.activation_zp_neg = activation_zp_neg
+        ctx.weight_zp_neg = weight_zp_neg
+
         return approx_convolution(
             input_padded, int_weight, bias, stride, act_scale, weight_scale, 
-            activation_zp, weight_zp, signed, bit_width, multiplier_matrix, 
+            activation_zp_neg, weight_zp_neg, signed, bit_width, multiplier_matrix, 
             dilation=dilation, groups=groups
         )
 
     @staticmethod
     def backward(ctx, grad_output):
-        input, weight, _ = ctx.saved_tensors
+        input_padded, weight, _ = ctx.saved_tensors
         act_scale, weight_scale = ctx.act_scale, ctx.weight_scale
-        activation_zp, weight_zp = 0, 0
-        try:
-            activation_zp = ctx.activation_zp
-            weight_zp = ctx.weight_zp
-        except AttributeError:
-            pass
+        activation_zp_neg = ctx.activation_zp_neg
+        weight_zp_neg = ctx.weight_zp_neg
             
         bit_width = ctx.bit_width
         signed = ctx.signed
         stride, padding, dilation, groups = ctx.stride, ctx.padding, ctx.dilation, ctx.groups
 
         error_derivate_weights = gradient_error_weights(
-            input, weight, grad_output, stride, activation_zp, bit_width, signed, 
+            input_padded, weight, grad_output, stride, activation_zp_neg, bit_width, signed, 
             padding=0, dilation=dilation, groups=groups
         )
         grad_weight = error_derivate_weights * act_scale
 
         error_derivate_inputs = gradient_error_inputs(
-            input, weight, grad_output, stride, padding, weight_zp, bit_width, signed, 
+            input_padded, weight, grad_output, stride, padding, weight_zp_neg, bit_width, signed, 
             dilation=dilation, groups=groups
         )
         grad_input = error_derivate_inputs * weight_scale
@@ -296,50 +342,60 @@ class ApproxConv2d(torch.autograd.Function):
         return grad_input, grad_weight, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
+# ********************* Functions Definition (STE, Quantized, Stats) *********************
+
+def get_zp_fill_value(activation_zp_neg):
+    """
+    Estrae il valore dello Zero-Point come float Python in modo sicuro da GPU/CPU.
+    Poiché activation_zp_neg contiene -ZP, lo Zero-Point reale è -activation_zp_neg.
+    """
+    if isinstance(activation_zp_neg, torch.Tensor):
+        return float(-activation_zp_neg.detach().cpu().reshape(-1)[0])
+    return float(-activation_zp_neg)
+
+
 class ApproxConv2dSTE(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input, weight, int_input, int_weight, bias, stride, padding, act_scale, weight_scale, 
-                activation_zp, weight_zp, signed, bit_width, name, multiplier_matrix, shift_bits=0, dilation=1, groups=1):
+                activation_zp_neg, weight_zp_neg, signed, bit_width, name, multiplier_matrix, shift_bits=0, dilation=1, groups=1):
         ctx.stride = stride
         ctx.padding = padding
         ctx.dilation = dilation
         ctx.groups = groups
         
         pad_h, pad_w = (padding, padding) if isinstance(padding, int) else padding
-        input_padded = nn.ZeroPad2d((pad_w, pad_w, pad_h, pad_h))(int_input)
+        if pad_h > 0 or pad_w > 0:
+            fill_val = get_zp_fill_value(activation_zp_neg)
+            input_padded = nn.functional.pad(int_input, (pad_w, pad_w, pad_h, pad_h), value=fill_val)
+        else:
+            input_padded = int_input
         
         ctx.save_for_backward(int_input, int_weight, bias)
         ctx.act_scale = act_scale
         ctx.weight_scale = weight_scale
-        if not signed:
-            ctx.activation_zp = activation_zp
-            ctx.weight_zp = weight_zp
-            
+        ctx.activation_zp_neg = activation_zp_neg
+        ctx.weight_zp_neg = weight_zp_neg
+
         return approx_convolution(
             input_padded, int_weight, bias, stride, act_scale, weight_scale, 
-            activation_zp, weight_zp, signed, bit_width, multiplier_matrix, 
+            activation_zp_neg, weight_zp_neg, signed, bit_width, multiplier_matrix, 
             dilation=dilation, groups=groups
         )
     
     @staticmethod
     def backward(ctx, grad_output):
         input, weight, _ = ctx.saved_tensors
-        activation_zp, weight_zp = 0, 0
-        try:
-            activation_zp = ctx.activation_zp
-            weight_zp = ctx.weight_zp
-        except AttributeError:
-            pass
-
+        activation_zp_neg = ctx.activation_zp_neg
+        weight_zp_neg = ctx.weight_zp_neg
         act_scale, weight_scale = ctx.act_scale, ctx.weight_scale
         stride, padding, dilation, groups = ctx.stride, ctx.padding, ctx.dilation, ctx.groups
 
         grad_weight = act_scale * torch.nn.grad.conv2d_weight(
-            input + activation_zp, weight.shape, grad_output, stride, padding, dilation, groups
+            input + activation_zp_neg, weight.shape, grad_output, stride, padding, dilation, groups
         )
         grad_input = weight_scale * torch.nn.grad.conv2d_input(
-            input.shape, weight + weight_zp, grad_output, stride, padding, dilation, groups
+            input.shape, weight + weight_zp_neg, grad_output, stride, padding, dilation, groups
         )   
 
         return grad_input, grad_weight, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
@@ -349,46 +405,44 @@ class QuantizedConv2d(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input, weight, int_input, int_weight, bias, stride, padding, act_scale, weight_scale, 
-                activation_zp, weight_zp, signed, _, __, ___, shift_bits=0, dilation=1, groups=1):
+                activation_zp_neg, weight_zp_neg, signed, _, __, ___, shift_bits=0, dilation=1, groups=1):
         ctx.stride = stride
         ctx.padding = padding
         ctx.dilation = dilation
         ctx.groups = groups
         
         pad_h, pad_w = (padding, padding) if isinstance(padding, int) else padding
-        input_padded = nn.ZeroPad2d((pad_w, pad_w, pad_h, pad_h))(int_input)
+        if pad_h > 0 or pad_w > 0:
+            fill_val = get_zp_fill_value(activation_zp_neg)
+            input_padded = nn.functional.pad(int_input, (pad_w, pad_w, pad_h, pad_h), value=fill_val)
+        else:
+            input_padded = int_input
         
         ctx.save_for_backward(int_input, int_weight, bias)
         ctx.act_scale = act_scale
         ctx.weight_scale = weight_scale
-        if not signed:
-            ctx.activation_zp = activation_zp
-            ctx.weight_zp = weight_zp
+        ctx.activation_zp_neg = activation_zp_neg
+        ctx.weight_zp_neg = weight_zp_neg
             
         return quantized_convolution(
             input_padded, int_weight, bias, stride, act_scale, weight_scale, 
-            activation_zp, weight_zp, signed, shift_bits=shift_bits, 
+            activation_zp_neg, weight_zp_neg, signed, shift_bits=shift_bits, 
             dilation=dilation, groups=groups
         )
     
     @staticmethod
     def backward(ctx, grad_output):
         input, weight, _ = ctx.saved_tensors
-        activation_zp, weight_zp = 0, 0
-        try:
-            activation_zp = ctx.activation_zp
-            weight_zp = ctx.weight_zp
-        except AttributeError:
-            pass
-        
+        activation_zp_neg = ctx.activation_zp_neg
+        weight_zp_neg = ctx.weight_zp_neg
         act_scale, weight_scale = ctx.act_scale, ctx.weight_scale
         stride, padding, dilation, groups = ctx.stride, ctx.padding, ctx.dilation, ctx.groups
 
         grad_weight = act_scale * torch.nn.grad.conv2d_weight(
-            input + activation_zp, weight.shape, grad_output, stride, padding, dilation, groups
+            input + activation_zp_neg, weight.shape, grad_output, stride, padding, dilation, groups
         )
         grad_input = weight_scale * torch.nn.grad.conv2d_input(
-            input.shape, weight + weight_zp, grad_output, stride, padding, dilation, groups
+            input.shape, weight + weight_zp_neg, grad_output, stride, padding, dilation, groups
         )   
 
         return grad_input, grad_weight, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
@@ -398,46 +452,44 @@ class StatsQuantizedConv2d(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input, weight, int_input, int_weight, bias, stride, padding, act_scale, weight_scale, 
-                activation_zp, weight_zp, signed, bit_width, name, _, shift_bits=0, dilation=1, groups=1):
+                activation_zp_neg, weight_zp_neg, signed, bit_width, name, multiplier_matrix, shift_bits=0, dilation=1, groups=1):
         ctx.stride = stride
         ctx.padding = padding
         ctx.dilation = dilation
         ctx.groups = groups
         
         pad_h, pad_w = (padding, padding) if isinstance(padding, int) else padding
-        input_padded = nn.ZeroPad2d((pad_w, pad_w, pad_h, pad_h))(int_input)
+        if pad_h > 0 or pad_w > 0:
+            fill_val = get_zp_fill_value(activation_zp_neg)
+            input_padded = nn.functional.pad(int_input, (pad_w, pad_w, pad_h, pad_h), value=fill_val)
+        else:
+            input_padded = int_input
         
         ctx.save_for_backward(int_input, int_weight, bias)
         ctx.act_scale = act_scale
         ctx.weight_scale = weight_scale
-        if not signed:
-            ctx.activation_zp = activation_zp
-            ctx.weight_zp = weight_zp
+        ctx.activation_zp_neg = activation_zp_neg
+        ctx.weight_zp_neg = weight_zp_neg
             
-        return quantized_convolution(
+        return stats_convolution(
             input_padded, int_weight, bias, stride, act_scale, weight_scale, 
-            activation_zp, weight_zp, signed, stats=True, bit_width=bit_width, 
-            name=name, shift_bits=shift_bits, dilation=dilation, groups=groups
+            activation_zp_neg, weight_zp_neg, signed, bit_width=bit_width, 
+            name=name, multiplier_matrix=multiplier_matrix, dilation=dilation, groups=groups
         )
-    
+
     @staticmethod
     def backward(ctx, grad_output):
         input, weight, _ = ctx.saved_tensors
-        activation_zp, weight_zp = 0, 0
-        try:
-            activation_zp = ctx.activation_zp
-            weight_zp = ctx.weight_zp
-        except AttributeError:
-            pass
-        
+        activation_zp_neg = ctx.activation_zp_neg
+        weight_zp_neg = ctx.weight_zp_neg
         act_scale, weight_scale = ctx.act_scale, ctx.weight_scale
         stride, padding, dilation, groups = ctx.stride, ctx.padding, ctx.dilation, ctx.groups
 
         grad_weight = act_scale * torch.nn.grad.conv2d_weight(
-            input + activation_zp, weight.shape, grad_output, stride, padding, dilation, groups
+            input + activation_zp_neg, weight.shape, grad_output, stride, padding, dilation, groups
         )
         grad_input = weight_scale * torch.nn.grad.conv2d_input(
-            input.shape, weight + weight_zp, grad_output, stride, padding, dilation, groups
+            input.shape, weight + weight_zp_neg, grad_output, stride, padding, dilation, groups
         )   
 
         return grad_input, grad_weight, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
