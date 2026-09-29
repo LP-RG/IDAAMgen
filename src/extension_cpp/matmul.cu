@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 #include <cmath>
+#include <cstdint>
 
 #define TILE_SIZE 32
 
@@ -115,15 +116,15 @@ namespace mat_mul{
         float sum = {0.0};
         int tiledRow = row;
         int tiledCol = t + threadIdx.x;
-        // Caricamento coalescente di A
+        
         if (tiledRow < M && tiledCol < K) {
             tile_A[threadIdx.y][threadIdx.x] = A[tiledRow * K + tiledCol];
         } else {
             tile_A[threadIdx.y][threadIdx.x] = 0.0f;
         }
-        // Loop per i blocchi di TILE_SIZE
+        
         for(int c = 0; c < N; c+=TILE_SIZE){
-            // Caricamento coalescente di B
+            
             tiledRow = t + threadIdx.y;
             tiledCol = c + threadIdx.x;
             if (tiledRow < K && tiledCol < N) {
@@ -134,7 +135,7 @@ namespace mat_mul{
 
             __syncthreads();
 
-            // Unrolling aggressivo e accesso alla memoria costante
+            
             #pragma unroll 8
             float a_val_sign = tile_A[threadIdx.y][threadIdx.x];
             for(int h = 0; h < TILE_SIZE; ++h){
@@ -206,20 +207,20 @@ namespace mat_mul{
 
         float sum[TILE_SIZE] = {0.0};
         
-        // Loop per i blocchi di TILE_SIZE
+        
         for (int t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; ++t) {            
             for(int i = 0; i < batch_size; ++i){
                 int tiledRow = row;
                 int tiledCol = t * TILE_SIZE + threadIdx.x;
 
-                // Caricamento coalescente di A
+                
                 if (tiledRow < M && tiledCol < K) {
                     tile_A[threadIdx.y][threadIdx.x] = A[i * M * K + tiledRow * K + tiledCol];
                 } else {
                     tile_A[threadIdx.y][threadIdx.x] = 0.0f;
                 }
 
-                // Caricamento coalescente di B
+                
                 tiledRow = t * TILE_SIZE + threadIdx.y;
                 tiledCol = col;
 
@@ -231,7 +232,7 @@ namespace mat_mul{
 
                 __syncthreads();
                 float grad_value = grad_out[i * N * M + col * M + row];
-                // Unrolling aggressivo e accesso alla memoria costante
+                
                 #pragma unroll 8
                 for (int k = 0; k < TILE_SIZE; ++k) {
                     float a_val_sign = tile_A[threadIdx.y][k];
@@ -239,7 +240,7 @@ namespace mat_mul{
                     if(sign_unsign){
                         sum[k] += (a_val_sign - diff_matrix_const[(__float2int_rn(a_val_sign) + res_offeset) * res_dim + (__float2int_rn(b_val_sign) + res_offeset)]) * grad_value;
                     }else{ 
-                        //Understand how to treat a_val_sign                     
+                        
                         sum[k] += ((a_val_sign + act_zp) - diff_matrix_const[(__float2int_rn(a_val_sign)) * res_dim + (__float2int_rn(b_val_sign))]) * grad_value;
                     }
                 }
@@ -283,22 +284,18 @@ namespace mat_mul{
         return C;
     }
 
-    __global__ void matmul_kernel(const float* __restrict__ A, 
-                                            const float* __restrict__ B, 
-                                            const float* __restrict__ res_matrix,
-                                            float* __restrict__ C, 
-                                            int M,
-                                            int N, 
-                                            int K, 
-                                            float act_scale, 
-                                            float act_min, 
-                                            float weight_scale, 
-                                            float weight_min,
-                                            int bit_width,
-                                            bool sign_unsign) {
-
-        __shared__ float tile_A[TILE_SIZE][TILE_SIZE];
-        __shared__ float tile_B[TILE_SIZE][TILE_SIZE];
+    __global__ void matmul_kernel(
+        const uint8_t* __restrict__ A, 
+        const uint8_t* __restrict__ B, 
+        const uint16_t* __restrict__ res_matrix,
+        float* __restrict__ C, 
+        int M, int N, int K, 
+        float act_scale, float act_min, 
+        float weight_scale, float weight_min,
+        int bit_width, bool sign_unsign
+    ) {
+        __shared__ uint8_t tile_A[TILE_SIZE][TILE_SIZE];
+        __shared__ uint8_t tile_B[TILE_SIZE][TILE_SIZE];
 
         int row = blockIdx.y * TILE_SIZE + threadIdx.y;
         int col = blockIdx.x * TILE_SIZE + threadIdx.x;
@@ -307,62 +304,64 @@ namespace mat_mul{
         A += batch * M * K;
         C += batch * M * N;
 
-        int res_dim = std::pow(2, bit_width);
-        int res_offeset = std::pow(2, bit_width - 1);
-        float activations_sum = 0.0f;
-        float weights_sum = 0.0f;
-        float sum = 0.0f;
+        const int res_dim = 1 << bit_width;          
+        const int res_offset = 1 << (bit_width - 1); 
 
-        // Loop per i blocchi di TILE_SIZE
+        int activations_sum = 0;
+        int weights_sum = 0;
+        int sum = 0;
+
         for (int t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; ++t) {
             int tiledRow = row;
             int tiledCol = t * TILE_SIZE + threadIdx.x;
 
-            // Caricamento coalescente di A
             if (tiledRow < M && tiledCol < K) {
                 tile_A[threadIdx.y][threadIdx.x] = A[tiledRow * K + tiledCol];
             } else {
-                tile_A[threadIdx.y][threadIdx.x] = 0.0f;
+                tile_A[threadIdx.y][threadIdx.x] = 0;
             }
 
-            // Caricamento coalescente di B
             tiledRow = t * TILE_SIZE + threadIdx.y;
             tiledCol = col;
 
             if (tiledRow < K && tiledCol < N) {
                 tile_B[threadIdx.y][threadIdx.x] = B[tiledRow * N + tiledCol];
             } else {
-                tile_B[threadIdx.y][threadIdx.x] = 0.0f;
+                tile_B[threadIdx.y][threadIdx.x] = 0;
             }
 
             __syncthreads();
 
-            // Unrolling aggressivo e accesso alla memoria costante
-            #pragma unroll 8
+            #pragma unroll
             for (int k = 0; k < TILE_SIZE; ++k) {
-                float a_val_sign = tile_A[threadIdx.y][k];
-                float b_val_sign = tile_B[k][threadIdx.x];
+                int a_val = tile_A[threadIdx.y][k];
+                int b_val = tile_B[k][threadIdx.x];
 
-                if(sign_unsign){
-                    sum += res_matrix[(__float2int_rn(a_val_sign ) + res_offeset) * res_dim + (__float2int_rn(b_val_sign) + res_offeset)];
-                }else{
-                    activations_sum += a_val_sign;
-                    weights_sum += b_val_sign;
-                    sum += res_matrix[(__float2int_rn(a_val_sign)) * res_dim + (__float2int_rn(b_val_sign))];
+                int index;
+                if (sign_unsign) {
+                    int a_idx = (int8_t)a_val + res_offset;
+                    int b_idx = (int8_t)b_val + res_offset;
+                    
+                    index = (a_idx << bit_width) + b_idx; 
+                } else {
+                    activations_sum += a_val;
+                    weights_sum += b_val;
+                    index = (a_val << bit_width) + b_val;
                 }
-                
+
+                sum += __ldg(&res_matrix[index]);
             }
 
             __syncthreads();
         }
 
-        // Scrittura coalescente del risultato
         if (row < M && col < N) {
-            if(sign_unsign){
-                C[row * N + col] =  act_scale * weight_scale * sum;
-            }
-            else{
-                C[row * N + col] = act_scale * weight_scale * (sum + activations_sum * weight_min + weights_sum * act_min + act_min * weight_min * K);
+            if (sign_unsign) {
+                C[row * N + col] = act_scale * weight_scale * (float)sum;
+            } else {
+                C[row * N + col] = act_scale * weight_scale * (
+                    sum + activations_sum * weight_min + weights_sum * act_min + act_min * weight_min * K
+                );
             }
         }
     }
@@ -373,14 +372,14 @@ namespace mat_mul{
         const int M = A.size(1);
         const int K = A.size(2);
         const int N = B.size(1);
-        auto C = torch::zeros({batch_size, M, N}, torch::TensorOptions().device(A.device()).dtype(A.dtype()));
+        auto C = torch::zeros({batch_size, M, N}, torch::TensorOptions().device(A.device()).dtype(torch::kFloat32));
         dim3 blockDim(TILE_SIZE, TILE_SIZE);
         dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE, batch_size);
 
         matmul_kernel<<<gridDim, blockDim>>>(
-            A.data_ptr<float>(), 
-            B.data_ptr<float>(),
-            res.data_ptr<float>(),
+            A.data_ptr<uint8_t>(), 
+            B.data_ptr<uint8_t>(),
+            res.data_ptr<uint16_t>(),
             C.data_ptr<float>(), 
             M, N, K,
             static_cast<float>(act_scale),
@@ -394,8 +393,8 @@ namespace mat_mul{
         return C;
     }
 
-    __global__ void matmul_no_error_cuda_kernel(const float* __restrict__ A, 
-                                            const float* __restrict__ B, 
+    __global__ void matmul_no_error_cuda_kernel(const uint8_t* __restrict__ A, 
+                                            const uint8_t* __restrict__ B, 
                                             float* __restrict__ C, 
                                             int M,
                                             int N, 
@@ -407,8 +406,8 @@ namespace mat_mul{
                                             int bit_width,
                                             bool sign_unsign,
                                             int shift_bits) {
-        __shared__ float tile_A[TILE_SIZE][TILE_SIZE];
-        __shared__ float tile_B[TILE_SIZE][TILE_SIZE];
+        __shared__ uint8_t tile_A[TILE_SIZE][TILE_SIZE];
+        __shared__ uint8_t tile_B[TILE_SIZE][TILE_SIZE];
 
         int row = blockIdx.y * TILE_SIZE + threadIdx.y;
         int col = blockIdx.x * TILE_SIZE + threadIdx.x;
@@ -417,35 +416,35 @@ namespace mat_mul{
         A += batch * M * K;
         C += batch * M * N;
 
-        float sum = 0.0f;
-        float activations_sum = 0.0f;
-        float weights_sum = 0.0f;
-        float shift_mult = exp2f((float)shift_bits); 
-        // Loop per i blocchi di TILE_SIZE
+        int sum = 0;
+        int activations_sum = 0;
+        int weights_sum = 0;
+        int shift_mult = exp2f((int)shift_bits); 
+        
         for (int t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; ++t) {
             int tiledRow = row;
             int tiledCol = t * TILE_SIZE + threadIdx.x;
 
-            // Caricamento coalescente di A
+            
             if (tiledRow < M && tiledCol < K) {
                 tile_A[threadIdx.y][threadIdx.x] = A[tiledRow * K + tiledCol];
             } else {
-                tile_A[threadIdx.y][threadIdx.x] = 0.0f;
+                tile_A[threadIdx.y][threadIdx.x] = 0;
             }
 
-            // Caricamento coalescente di B
+            
             tiledRow = t * TILE_SIZE + threadIdx.y;
             tiledCol = col;
 
             if (tiledRow < K && tiledCol < N) {
                 tile_B[threadIdx.y][threadIdx.x] = B[tiledRow * N + tiledCol];
             } else {
-                tile_B[threadIdx.y][threadIdx.x] = 0.0f;
+                tile_B[threadIdx.y][threadIdx.x] = 0;
             }
 
             __syncthreads();
 
-            // Unrolling aggressivo e accesso alla memoria costante
+            
             #pragma unroll 8
             for (int k = 0; k < TILE_SIZE; ++k) {
                 float a_val_sign = tile_A[threadIdx.y][k];
@@ -461,7 +460,7 @@ namespace mat_mul{
             __syncthreads();
         }
 
-        // Scrittura coalescente del risultato
+        
         if (row < M && col < N) {
             if(sign_unsign){
                 C[row * N + col] = sum * act_scale * weight_scale;
@@ -478,13 +477,13 @@ namespace mat_mul{
         const int M = A.size(1);
         const int K = A.size(2);
         const int N = B.size(1);
-        auto C = torch::zeros({batch_size, M, N}, torch::TensorOptions().device(A.device()).dtype(A.dtype()));
+        auto C = torch::zeros({batch_size, M, N}, torch::TensorOptions().device(A.device()).dtype(torch::kFloat32));
         dim3 blockDim(TILE_SIZE, TILE_SIZE);
         dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE, batch_size);
         
         matmul_no_error_cuda_kernel<<<gridDim, blockDim>>>(
-            A.data_ptr<float>(), 
-            B.data_ptr<float>(),
+            A.data_ptr<uint8_t>(), 
+            B.data_ptr<uint8_t>(),
             C.data_ptr<float>(), 
             M, N, K,
             static_cast<float>(act_scale),
@@ -500,9 +499,9 @@ namespace mat_mul{
     }
     
     
-    __global__ void matmul_stats_kernel(const float* __restrict__ A,
-                                     const float* __restrict__ B,
-                                     const float* __restrict__ res_matrix,
+    __global__ void matmul_stats_kernel(const uint8_t* __restrict__ A,
+                                     const uint8_t* __restrict__ B,
+                                     const uint16_t* __restrict__ res_matrix,
                                      float* __restrict__ C,
                                      float* __restrict__ heat_map, 
                                      int M, int N, int K,
@@ -519,9 +518,9 @@ namespace mat_mul{
         A += batch * M * K;
         C += batch * M * N;
 
-        float sum = 0.0f;
-        float activations_sum = 0.0f;
-        float weights_sum = 0.0f;
+        int sum = 0.0f;
+        int activations_sum = 0.0f;
+        int weights_sum = 0.0f;
 
         const int res_dim = 1 << bit_width;
 
@@ -600,13 +599,13 @@ namespace mat_mul{
         dim3 blockDim(TILE_SIZE, TILE_SIZE);
         dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE,
                     (M + TILE_SIZE - 1) / TILE_SIZE, batch_size);
-        float* res_ptr = nullptr;
+        uint16_t* res_ptr = nullptr;
         if (res.defined()) {
-            res_ptr = res.data_ptr<float>();
+            res_ptr = res.data_ptr<uint16_t>();
         }
         matmul_stats_kernel<<<gridDim, blockDim>>>(
-            A.data_ptr<float>(),
-            B.data_ptr<float>(),
+            A.data_ptr<uint8_t>(),
+            B.data_ptr<uint8_t>(),
             res_ptr,
             C.data_ptr<float>(),
             heat_map.data_ptr<float>(),

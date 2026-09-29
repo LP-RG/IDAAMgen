@@ -50,10 +50,10 @@ def calibration(model: nn.Module):
             inputs = inputs.to(device)
             model(inputs)
 
-
     for m in model.modules():
         if isinstance(m, conv.Conv2d_custom):
             m.freeze_qparams()
+
 
 def get_stats(model):
     print("getting input_distribution")
@@ -62,7 +62,8 @@ def get_stats(model):
         for inputs, _ in train_loader:
             inputs = inputs.to(device)
             model(inputs)
-            
+
+
 def set_data_loaders(model_name: str, cli_dataset_name: str = None):
     """
     Seleziona automaticamente il dataset, la dimensione dell'immagine (32x32 vs 224x224) 
@@ -142,10 +143,29 @@ def get_exact_training_setup(model_name: str, model: nn.Module):
     return epochs, optimizer, scheduler
 
 
+def freeze_batchnorm(model):
+    """
+    Congela sia le statistiche (running_mean/running_var) 
+    sia i parametri apprendibili (gamma e beta) di tutti i layer BatchNorm.
+    """
+    for m in model.modules():
+        if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d, nn.BatchNorm3d)):
+            print(f"freezin batch layer {m}")
+            # 1. Metti il layer BN in modalità eval per NON aggiornare running_mean e running_var
+            m.eval()
+            
+            # 2. Congela i parametri gamma e beta per NON aggiornarli con il gradient descent
+            if m.weight is not None:
+                m.weight.requires_grad = False
+            if m.bias is not None:
+                m.bias.requires_grad = False
+
+
 def train_one_epoch(epoch: int, model: nn.Module, optimizer: optim.Optimizer, criterion: nn.Module):
     """Esegue un'epoca di addestramento e calcola loss/accuratezza."""
     print(f"Training epoch {epoch + 1}...")
     model.train()
+    # freeze_batchnorm(model)
     total_loss, correct, total = 0.0, 0, 0
     for batch, (inputs, targets) in enumerate(train_loader):
         inputs, targets = inputs.to(device), targets.to(device)
@@ -180,7 +200,6 @@ def test(model: nn.Module) -> float:
             _, predicted = outputs.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
-            #print("Targets:", targets[:500])
     acc = 100.0 * correct / total
     print(f"Test Accuracy: {acc:.2f}%")
     return acc
@@ -201,7 +220,7 @@ def new_training_method(
     input_name = os.path.basename(multiplier_matrix) if isinstance(multiplier_matrix, str) else "None"
 
     print(f"\n[EXECUTION] Model: {model_name} | ConvType: {conv_type} | BitWidth: {bit_width} | "
-          f"Signed: {signed} | Multiplier: {input_name} | Dataset: {dataset_name}")
+          f"Signed: {signed} | Multiplier: {input_name} | Dataset: {dataset_name} | NoRetraining: {no_retraining}")
 
     models_dir = trained_models_path.rstrip('/')
     os.makedirs(models_dir, exist_ok=True)
@@ -291,12 +310,13 @@ def new_training_method(
         model = build_model(
             model_name, conv_type=conv_type, bit_width=bit_width, signed=signed,
             zone=zone, multiplier_matrix=multiplier_matrix, num_classes=num_classes, shift_bits=shift_bits,
-            dataset_name=dataset_name,  # 
+            dataset_name=dataset_name,  
         )
         model.load_state_dict(torch.load(quant_path, map_location=device, weights_only=True))
         calibration(model)
 
         if no_retraining:
+            print("Executing Zero-Shot Evaluation (No Fine-Tuning)...")
             acc = test(model)
             torch.save(model.state_dict(), approx_noretrain_path)
             with open(config_path, "w") as f:
@@ -384,10 +404,18 @@ if __name__ == "__main__":
         setup_seed(args.seed)
         set_data_loaders(model_name, args.dataset)
         acc = new_training_method(
-            model_name, None, args.conv_type, args.bit_width,
-            args.signed, args.zone, args.exact_accuracy, shift_bits=args.shift_bits
+            model_name=model_name,
+            multiplier_matrix=None,
+            conv_type=args.conv_type,
+            bit_width=args.bit_width,
+            signed=args.signed,
+            zone=args.zone,
+            exact_accuracy=args.exact_accuracy,
+            no_retraining=args.no_retraining,
+            shift_bits=args.shift_bits,
         )
         print(f"\nFinal Accuracy: {acc:.2f}%")
+        print(f"Total time elapsed: {time.time() - start_time:.2f} seconds")
         sys.exit(0)
 
     if not os.path.exists(p):
@@ -398,11 +426,19 @@ if __name__ == "__main__":
         setup_seed(args.seed)
         set_data_loaders(model_name, args.dataset)
         acc = new_training_method(
-            model_name, p, args.conv_type, args.bit_width,
-            args.signed, args.zone, args.exact_accuracy, args.no_retraining, shift_bits=args.shift_bits
+            model_name=model_name,
+            multiplier_matrix=p,
+            conv_type=args.conv_type,
+            bit_width=args.bit_width,
+            signed=args.signed,
+            zone=args.zone,
+            exact_accuracy=args.exact_accuracy,
+            no_retraining=args.no_retraining,
+            shift_bits=args.shift_bits,
         )
         print(f"\nFINAL_ACCURACY: {acc:.2f}%")
         clean_gpu()
+        print(f"Total time elapsed: {time.time() - start_time:.2f} seconds")
         sys.exit(0)
 
     results = {}
@@ -413,8 +449,15 @@ if __name__ == "__main__":
         setup_seed(args.seed)
         set_data_loaders(model_name, args.dataset)
         acc = new_training_method(
-            model_name, file_path, args.conv_type, args.bit_width,
-            args.signed, args.zone, args.exact_accuracy, args.no_retraining, shift_bits=args.shift_bits
+            model_name=model_name,
+            multiplier_matrix=file_path,
+            conv_type=args.conv_type,
+            bit_width=args.bit_width,
+            signed=args.signed,
+            zone=args.zone,
+            exact_accuracy=args.exact_accuracy,
+            no_retraining=args.no_retraining,
+            shift_bits=args.shift_bits,
         )
         print(f"File {f} -> FINAL_ACCURACY: {acc:.2f}%")
         results[f] = acc

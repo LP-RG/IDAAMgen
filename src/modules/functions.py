@@ -5,6 +5,16 @@ import torch.nn as nn
 
 heat_map_path = "./heat_maps/npy_matrix/"
 
+def _unfold_int_safe(x, kernel_size, dilation, stride):
+    if x.is_floating_point():
+        return nn.functional.unfold(
+            x, kernel_size=kernel_size, dilation=dilation, padding=0, stride=stride
+        )
+    orig_dtype = x.dtype
+    out = nn.functional.unfold(
+        x.float(), kernel_size=kernel_size, dilation=dilation, padding=0, stride=stride
+    )
+    return out.round().to(orig_dtype)
 # ********************* Backpropagation Custom Methods *********************
 
 def gradient_error_inputs(input, kernel, grad_output, stride, padding, weight_zp, bit_width, signed, dilation=1, groups=1):
@@ -119,7 +129,7 @@ def approx_convolution(input, weight, bias, stride, act_scale, weight_scale, act
             bit_width=bit_width, name=None, dilation=dilation, groups=groups
         )
 
-    res_matrix = torch.from_numpy(np.load(multiplier_matrix)).float().to("cuda")
+    res_matrix = torch.from_numpy(np.load(multiplier_matrix)).to(torch.uint16).to("cuda").contiguous()
     batch_size, in_channels, in_height, in_width = input.size()
     out_channels, in_channels_per_group, weight_height, weight_width = weight.size()
     
@@ -139,7 +149,7 @@ def approx_convolution(input, weight, bias, stride, act_scale, weight_scale, act
     output_groups = []
 
     for g in range(groups):
-        input_unfolded = nn.functional.unfold(
+        input_unfolded = _unfold_int_safe(
             input_groups[g], 
             kernel_size=(weight_height, weight_width), 
             dilation=dilation, 
@@ -185,7 +195,6 @@ def quantized_convolution(input, weight, bias, stride, act_scale, weight_scale, 
 
         input = input_int.to(input_dtype)
         weight = weight_int.to(weight_dtype)
-
     dil_h, dil_w = (dilation, dilation) if isinstance(dilation, int) else dilation
     str_h, str_w = (stride, stride) if isinstance(stride, int) else stride
 
@@ -200,14 +209,13 @@ def quantized_convolution(input, weight, bias, stride, act_scale, weight_scale, 
     output_groups = []
 
     for g in range(groups):
-        input_unfolded = nn.functional.unfold(
+        input_unfolded = _unfold_int_safe(
             input_groups[g], 
             kernel_size=(weight_height, weight_width), 
             dilation=dilation, 
             stride=stride
         )
         kernel_flatten = weight_groups[g].view(out_channels_per_group, -1)
-
 
         out_g = torch.ops.mat_mul.matmul_no_error_cuda(
             input_unfolded.transpose(1, 2).contiguous(), 
@@ -233,7 +241,7 @@ def stats_convolution(input, weight, bias, stride, act_scale, weight_scale, acti
 
     try:
         approx = True
-        res_matrix = torch.from_numpy(np.load(multiplier_matrix)).float().to("cuda").contiguous()
+        res_matrix = torch.from_numpy(np.load(multiplier_matrix)).to(torch.uint16).to("cuda").contiguous()
     except:
         approx = False
         res_matrix = None
@@ -257,7 +265,7 @@ def stats_convolution(input, weight, bias, stride, act_scale, weight_scale, acti
     output_groups = []
 
     for g in range(groups):
-        input_unfolded = nn.functional.unfold(
+        input_unfolded = _unfold_int_safe(
             input_groups[g],
             kernel_size=(weight_height, weight_width),
             dilation=dilation,

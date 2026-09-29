@@ -125,10 +125,10 @@ class Conv2d_custom(nn.Conv2d):
         else:
             input_int = quantization.unsigned_quantization(
                 input, self.activation_scale, self.activation_zp_neg, self.bit_width
-            )
+            ).to(torch.uint8)
             weight_int = quantization.unsigned_quantization(
                 self.weight, self.weight_scale, self.weight_zp_neg, self.bit_width
-            )
+            ).to(torch.uint8)
 
         
         out = self.conv2d_op.apply(
