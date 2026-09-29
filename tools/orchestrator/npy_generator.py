@@ -46,7 +46,7 @@ def circuits_analizer(input_path):
     print("Synth completed")
     return {"file": os.path.basename(input_path), "area": area, "power": power, "delay": delay}
 
-def generate_npy_for_single_file(input_verilog, bitwidth, output_npy_path, experiment_name):
+def generate_npy_for_single_file(input_verilog, bitwidth, output_npy_path, experiment_name, heat_maps_path):
     base_filename = os.path.basename(input_verilog)
     name, ext = os.path.splitext(base_filename)
     
@@ -56,7 +56,7 @@ def generate_npy_for_single_file(input_verilog, bitwidth, output_npy_path, exper
     sub_xpat_circuits_generator.generate_approx_mult_function(input_verilog, bitwidth)
 
     try:
-        mean_ae, mean_ae_cnn, max_error = sub_x_pat_simulator.execute_save(bitwidth, output_npy_path)
+        mean_ae, mean_ae_cnn, max_error = sub_x_pat_simulator.execute_save(bitwidth, output_npy_path, heat_maps_path)
         data = circuits_analizer(input_verilog)
         pda = data['area'] * data['power'] * data['delay']
 
@@ -82,8 +82,11 @@ def generate_npy_for_single_file(input_verilog, bitwidth, output_npy_path, exper
         print(f"[NPY GEN] Error: {e}")
         sys.exit(1)
     finally:
-        if os.path.exists("sub_x_pat_multiplier.py"):
-            os.remove("sub_x_pat_multiplier.py")
+        target_dir = os.path.dirname(os.path.abspath(sub_xpat_circuits_generator.__file__))
+        target_file = os.path.join(target_dir, "sub_x_pat_multiplier.py")
+
+        if os.path.exists(target_file):
+            os.remove(target_file)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -91,5 +94,6 @@ if __name__ == "__main__":
     parser.add_argument("bitwidth", type=int)
     parser.add_argument("output_npy")
     parser.add_argument("--experiment-name", required=True)
+    parser.add_argument("--heat-maps-path", default="heat_maps/npy_matrix/8bit_resnet_20", required=False)
     args = parser.parse_args()
-    generate_npy_for_single_file(args.input_verilog, args.bitwidth, args.output_npy, args.experiment_name)
+    generate_npy_for_single_file(args.input_verilog, args.bitwidth, args.output_npy, args.experiment_name, args.heat_maps_path)
