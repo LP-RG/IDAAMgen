@@ -5,16 +5,32 @@ import torch.nn as nn
 
 heat_map_path = "./heat_maps/npy_matrix/"
 
-def _unfold_int_safe(x, kernel_size, dilation, stride):
-    if x.is_floating_point():
-        return nn.functional.unfold(
-            x, kernel_size=kernel_size, dilation=dilation, padding=0, stride=stride
-        )
-    orig_dtype = x.dtype
-    out = nn.functional.unfold(
-        x.float(), kernel_size=kernel_size, dilation=dilation, padding=0, stride=stride
-    )
-    return out.round().to(orig_dtype)
+
+_RES_MATRIX_CACHE = {}
+
+def get_res_matrix(matrix_path, device="cuda"):
+    if matrix_path not in _RES_MATRIX_CACHE:
+        matrix = torch.from_numpy(np.load(matrix_path)).to(torch.uint16).to(device).contiguous()
+        _RES_MATRIX_CACHE[matrix_path] = matrix
+    return _RES_MATRIX_CACHE[matrix_path]
+
+def _unfold_int_safe(x, kernel_size, dilation, stride, padding=0):
+
+    kh, kw = (kernel_size, kernel_size) if isinstance(kernel_size, int) else kernel_size
+    dh, dw = (dilation, dilation) if isinstance(dilation, int) else dilation
+    sh, sw = (stride, stride) if isinstance(stride, int) else stride
+
+    if padding:
+        ph, pw = (padding, padding) if isinstance(padding, int) else padding
+        x = nn.functional.pad(x, (pw, pw, ph, ph))
+
+    b, c, _, _ = x.shape
+    bh, bw = dh * (kh - 1) + 1, dw * (kw - 1) + 1
+    xn = x.unfold(2, bh, sh).unfold(3, bw, sw)          # [b, c, oh, ow, bh, bw]
+    if dh > 1 or dw > 1:
+        xn = xn[..., ::dh, ::dw]                         # [b, c, oh, ow, kh, kw]
+    oh, ow = xn.shape[2], xn.shape[3]
+    return xn.permute(0, 1, 4, 5, 2, 3).reshape(b, c * kh * kw, oh * ow)
 # ********************* Backpropagation Custom Methods *********************
 
 def gradient_error_inputs(input, kernel, grad_output, stride, padding, weight_zp, bit_width, signed, dilation=1, groups=1):
@@ -129,7 +145,7 @@ def approx_convolution(input, weight, bias, stride, act_scale, weight_scale, act
             bit_width=bit_width, name=None, dilation=dilation, groups=groups
         )
 
-    res_matrix = torch.from_numpy(np.load(multiplier_matrix)).to(torch.uint16).to("cuda").contiguous()
+    res_matrix = get_res_matrix(multiplier_matrix, device="cuda")
     batch_size, in_channels, in_height, in_width = input.size()
     out_channels, in_channels_per_group, weight_height, weight_width = weight.size()
     
@@ -172,7 +188,6 @@ def approx_convolution(input, weight, bias, stride, act_scale, weight_scale, act
     if bias is not None:
         output.add_(bias.view(1, out_channels, 1, 1))
         
-    del res_matrix
     return output
 
 

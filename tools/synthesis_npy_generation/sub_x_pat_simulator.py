@@ -33,10 +33,6 @@ def compute_adapted_mult(i: int, y: int, bit_width: int, sub_x_pat_multiplier) -
         return int(res_hw << (2 * shift))
     elif shift == 0:
         return int(sub_x_pat_multiplier.approx_mult(i, y))
-    else:
-        # If bit_width > 8, perform padding with shift
-        ext = bit_width - 8
-        return int(sub_x_pat_multiplier.approx_mult(i << ext, y << ext) >> (2 * ext))
 
 def multiplier_test(bit_width, filename, sub_x_pat_multiplier):
     scrumbled_res = np.zeros((256, 256), dtype=np.int64)

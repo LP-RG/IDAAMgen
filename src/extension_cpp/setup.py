@@ -8,7 +8,7 @@ setup(
             name='mat_mul',
             sources=['matmul.cu'],
             extra_compile_args={
-                'nvcc': ['-g']
+                'nvcc': ['-g', '-Xptxas', '-v']
             }
         )
     ],
