@@ -196,20 +196,6 @@ def quantized_convolution(input, weight, bias, stride, act_scale, weight_scale, 
     batch_size, in_channels, in_height, in_width = input.size()
     out_channels, in_channels_per_group, weight_height, weight_width = weight.size()
     out_channels_per_group = out_channels // groups
-    if shift_bits > 0:
-        input_dtype = input.dtype
-        weight_dtype = weight.dtype
-        int_dtype = torch.int32
-
-        input_int = input.to(int_dtype)
-        weight_int = weight.to(int_dtype)
-        input_int = torch.div(input_int, 2**shift_bits, rounding_mode='trunc') if signed \
-            else torch.bitwise_right_shift(input_int, shift_bits)
-        weight_int = torch.div(weight_int, 2**shift_bits, rounding_mode='trunc') if signed \
-            else torch.bitwise_right_shift(weight_int, shift_bits)
-
-        input = input_int.to(input_dtype)
-        weight = weight_int.to(weight_dtype)
     dil_h, dil_w = (dilation, dilation) if isinstance(dilation, int) else dilation
     str_h, str_w = (stride, stride) if isinstance(stride, int) else stride
 

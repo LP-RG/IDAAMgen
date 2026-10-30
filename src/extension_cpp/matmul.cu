@@ -579,16 +579,16 @@ namespace mat_mul{
 
                 #pragma unroll
                 for (int m = 0; m < TM; ++m) {
-                    const float a_val_sign = s_A[tid_m * TM + m][dot_k];
-                    reg_A[m] = a_val_sign * shift_mult;
-                    act_acc[m] += reg_A[m];
+                    const int a_val_sign = s_A[tid_m * TM + m][dot_k];
+                    reg_A[m] = (a_val_sign >> shift_bits) * shift_mult;
+                    act_acc[m] += a_val_sign;
                 }
 
                 #pragma unroll
                 for (int n = 0; n < TN; ++n) {
-                    const float b_val_sign = s_B[dot_k][tid_n * TN + n];
-                    reg_B[n] = b_val_sign * shift_mult;
-                    weight_acc[n] += reg_B[n];
+                    const int b_val_sign = s_B[dot_k][tid_n * TN + n];
+                    reg_B[n] = (b_val_sign >> shift_bits) * shift_mult;
+                    weight_acc[n] += b_val_sign;
                 }
 
                 #pragma unroll
